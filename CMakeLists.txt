@@ -123,6 +123,8 @@ set(MANAGER_SRC
     "src/mm_manager.c"
     "src/mm_manager.h"
     "src/mm_accounting.c"
+    "src/mm_cardman_bridge.c"
+    "src/mm_cardman_bridge.h"
     "src/mm_connection.c"
     "src/mm_modem.c"
     "src/mm_pcap.c"
