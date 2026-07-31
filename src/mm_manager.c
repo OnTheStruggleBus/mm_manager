@@ -787,8 +787,60 @@ static int process_mm_table(mm_context_t* context, mm_table_t* table) {
                 cdr->seq = LE16(cdr->seq);
                 cdr->call_cost[0] = LE16(cdr->call_cost[0]);
                 cdr->call_cost[1] = LE16(cdr->call_cost[1]);
+                /* auth_code was never byte-swapped upstream (only ever
+                 * used for CDR_DEBUG printing before this integration) -
+                 * now that it's used to match a real CARDMAN hold, it
+                 * needs the same LE64 treatment the auth handler already
+                 * applies to this field's wire representation. */
+                cdr->auth_code = LE64(cdr->auth_code);
 
                 mm_acct_save_TCDR(context->database, &context->telco, terminal_id, cdr);
+
+                /* CARDMAN integration: submit this CDR to the bridge for
+                 * real settlement via CDRI, not just local TCDR logging.
+                 * Not fail-closed - the call already happened, a bridge
+                 * failure here is logged, not a reason to alter terminal
+                 * behavior. See CDR_CONTRACT_SCOPING.md in the
+                 * mm-cardman-integration repo for the field mapping.
+                 */
+                {
+                    char cdr_id[64]        = { 0 };
+                    char auth_code_hex[20] = { 0 };
+                    char pan_string[25]    = { 0 };
+                    char called_number[21] = { 0 };
+                    char start_ts[24]      = { 0 };
+                    cardman_cdr_request_t  cdr_req = { 0 };
+                    uint32_t duration_secs;
+
+                    snprintf(cdr_id, sizeof(cdr_id), "mm-%s-%u", terminal_id, cdr->seq);
+                    snprintf(auth_code_hex, sizeof(auth_code_hex), "%08" PRIX64, cdr->auth_code);
+
+                    phone_num_to_string(pan_string, sizeof(pan_string), cdr->card_num, sizeof(cdr->card_num));
+                    phone_num_to_string(called_number, sizeof(called_number), cdr->called_num,
+                        sizeof(cdr->called_num));
+
+                    /* start_timestamp fields are (year-1900, month, day,
+                     * hour, min, sec), same convention mm_acct_save_TCDR()
+                     * above already uses via timestamp_to_db_string(). */
+                    snprintf(start_ts, sizeof(start_ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                        cdr->start_timestamp[0] + 1900, cdr->start_timestamp[1], cdr->start_timestamp[2],
+                        cdr->start_timestamp[3], cdr->start_timestamp[4], cdr->start_timestamp[5]);
+
+                    /* call_duration is (hours, minutes, seconds), same
+                     * convention mm_acct_save_TCDR() above already uses. */
+                    duration_secs = (uint32_t)cdr->call_duration[0] * 3600U
+                                  + (uint32_t)cdr->call_duration[1] * 60U
+                                  + (uint32_t)cdr->call_duration[2];
+
+                    cdr_req.cdr_id = cdr_id;
+                    cdr_req.auth_code = auth_code_hex;
+                    cdr_req.pan = pan_string;
+                    cdr_req.called_number = called_number;
+                    cdr_req.duration_secs = duration_secs;
+                    cdr_req.start_ts = start_ts;
+
+                    cardman_bridge_submit_cdr(&cdr_req);
+                }
 
                 /* If terminal is transferring multiple tables, queue the CDR response for later, after receiving DLOG_MT_END_DATA */
                 if (context->trans_data_in_progress == 1) {
