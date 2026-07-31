@@ -1,23 +1,27 @@
 # Workflow name
 name: Create or Update Release, Build, Test, and Upload Assets
 
-# Trigger the workflow on push to main OR when a release is created
+# Trigger the workflow on push to main, when a release is created, or
+# manually (workflow_dispatch) so a release build doesn't require a new
+# commit.
 on:
   push:
     branches: [ main ]
   release:
     types: [ created ]
+  workflow_dispatch: {}
 
 # Permissions needed to create releases and upload assets
 permissions:
   contents: write # Needed for gh release commands
 
 jobs:
-  # This job only runs on push events to create the pre-release
+  # This job runs on push and manual (workflow_dispatch) events to
+  # create the pre-release. 'release' events already have a release -
+  # that's what triggered the workflow - so this job skips for those.
   prepare_release:
-    name: Create Pre-Release (on push)
-    # Conditionally run this job only if the event is 'push'
-    if: github.event_name == 'push'
+    name: Create Pre-Release (on push or manual dispatch)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       # Output the upload URL and the generated tag for the build job
@@ -43,14 +47,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.get_tag.outputs.tag }}
         run: |
-          echo "Creating pre-release for tag $TAG_NAME"
-          # Create the pre-release using the generated tag
-          # Use --repo to be explicit, reducing reliance on local .git context, but checkout is still best practice
-          gh release create "$TAG_NAME" \
-            --repo "${{ github.repository }}" \
-            --title "Pre-release (commit ${{ github.sha }})" \
-            --notes "Automated pre-release based on commit ${{ github.sha }}. Contains build artifacts for Linux, macOS, and Windows (x64/x86)." \
-            --prerelease # Mark it as a pre-release
+          # Idempotent: a workflow_dispatch re-run on a commit that
+          # already has a pre-release (e.g. re-running after a build
+          # fix with no new commit) should reuse it, not fail with
+          # "release already exists" - matches this workflow's own
+          # "Create or Update" name, which the original version of this
+          # step didn't actually implement.
+          if gh release view "$TAG_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME already exists, reusing it."
+          else
+            echo "Creating pre-release for tag $TAG_NAME"
+            gh release create "$TAG_NAME" \
+              --repo "${{ github.repository }}" \
+              --title "Pre-release (commit ${{ github.sha }})" \
+              --notes "Automated pre-release based on commit ${{ github.sha }}. Contains build artifacts for Linux (glibc + static/musl - the static build runs on any distro), macOS, and Windows (x64/x86)." \
+              --prerelease # Mark it as a pre-release
+          fi
 
       # Get the upload URL (optional, but good practice if needed elsewhere)
       - name: Get Release Upload URL
@@ -74,32 +86,60 @@ jobs:
     if: success() || needs.prepare_release.result == 'skipped'
     runs-on: ${{ matrix.os }}
     strategy:
+      # Don't cancel every other platform's build just because one
+      # target failed - defeats the purpose of a multi-platform release
+      # matrix (you'd get zero assets instead of N-1).
+      fail-fast: false
       matrix:
         include:
+          # glibc build: dynamically linked against whatever glibc version
+          # ubuntu-latest ships. Runs on distros with an equal-or-newer
+          # glibc; will NOT run on older ones (e.g. older RHEL/CentOS).
           - os: ubuntu-latest
             arch: x64
-            target_name: Linux-x64
+            target_name: Linux-x64-glibc
             package_glob: '*.tar.gz'
             cmake_arg: ''
-            shell_type: bash # Explicitly set shell for clarity
+            shell_type: bash
+            container: ''
+          # musl static build: fully statically linked (musl libc has no
+          # dynamic-linking caveats glibc does), zero runtime dependency
+          # on the host's libc version at all - this is the one that
+          # actually runs on "all major distros" (old or new, glibc or
+          # musl-based like Alpine) unmodified. Prefer this asset unless
+          # you specifically need the dynamic glibc build.
+          - os: ubuntu-latest
+            arch: x64
+            target_name: Linux-x64-static
+            package_glob: '*.tar.gz'
+            cmake_arg: '-DCMAKE_EXE_LINKER_FLAGS=-static'
+            shell_type: bash # installed via apk below - Alpine has no bash by default
+            container: 'alpine:3.20'
           - os: macos-latest
             arch: x64
             target_name: macOS-x64
             package_glob: '*.tar.gz'
             cmake_arg: ''
             shell_type: bash # Explicitly set shell for clarity
+            container: ''
           - os: windows-latest
             arch: x64
             target_name: Windows-x64
             package_glob: '*.zip'
             cmake_arg: ''
             shell_type: pwsh # Explicitly set shell for clarity
+            container: ''
           - os: windows-latest
             arch: x86
             target_name: Windows-x86
             package_glob: '*.zip'
             cmake_arg: '-A Win32'
             shell_type: pwsh # Explicitly set shell for clarity
+            container: ''
+
+    # Run inside a container for matrix entries that specify one (the
+    # musl static build); everything else runs directly on the runner.
+    container: ${{ matrix.container != '' && matrix.container || null }}
 
     # Set the default shell based on the matrix strategy
     defaults:
@@ -124,6 +164,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install socat
 
+      - name: Install build dependencies (Alpine musl static build)
+        if: matrix.target_name == 'Linux-x64-static'
+        # Override the job-level bash default - bash isn't installed yet
+        # in a fresh Alpine container, this step is what installs it.
+        shell: sh
+        run: apk add --no-cache bash cmake make gcc g++ musl-dev linux-headers git tar github-cli
+
       - name: Configure CMake
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_arg }}
 
@@ -139,14 +186,24 @@ jobs:
         run: cpack -C Release
 
       # --- Get Package Info ---
+      # CPack's default output filename doesn't vary by target within the
+      # same CMAKE_SYSTEM_NAME (e.g. both Linux-x64-glibc and
+      # Linux-x64-static build "mm_manager-<version>-Linux.tar.gz"; both
+      # Windows-x64 and Windows-x86 build the same *.zip name too) - so
+      # every matrix entry renames its package to embed target_name
+      # before upload, or later entries would silently clobber earlier
+      # ones in the same release.
       - name: Get Package Info & Set Env Vars (Linux/macOS)
         # Only run this step on non-Windows runners
         if: runner.os != 'Windows'
         working-directory: ./build
         run: |
-          # Find the package file using the glob pattern
-          asset_path=$(ls ${{ matrix.package_glob }})
-          echo "Found asset: $asset_path"
+          # Find the package file using the glob pattern (every non-Windows
+          # entry in this matrix uses *.tar.gz)
+          orig_path=$(ls ${{ matrix.package_glob }})
+          asset_path="mm_manager-${{ matrix.target_name }}.tar.gz"
+          mv "$orig_path" "$asset_path"
+          echo "Found asset: $orig_path, renamed to: $asset_path"
           # Set environment variables for subsequent steps
           echo "ASSET_PATH=${asset_path}" >> $GITHUB_ENV
           echo "ASSET_NAME=${asset_path}" >> $GITHUB_ENV # Asset name is the filename
@@ -163,8 +220,10 @@ jobs:
             Write-Error "Could not find package file matching pattern: ${{ matrix.package_glob }}"
             exit 1
           }
-          $asset_path = $asset_info.Name
-          Write-Host "Found asset: $asset_path"
+          $orig_path = $asset_info.Name
+          $asset_path = "mm_manager-${{ matrix.target_name }}.zip"
+          Rename-Item -Path $orig_path -NewName $asset_path
+          Write-Host "Found asset: $orig_path, renamed to: $asset_path"
           # Set environment variables using the PowerShell way to append to GITHUB_ENV
           echo "ASSET_PATH=$asset_path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           echo "ASSET_NAME=$asset_path" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
