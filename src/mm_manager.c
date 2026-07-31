@@ -808,7 +808,7 @@ static int process_mm_table(mm_context_t* context, mm_table_t* table) {
                     char auth_code_hex[20] = { 0 };
                     char pan_string[25]    = { 0 };
                     char called_number[21] = { 0 };
-                    char start_ts[24]      = { 0 };
+                    char start_ts[32]      = { 0 };
                     cardman_cdr_request_t  cdr_req = { 0 };
                     uint32_t duration_secs;
 
