@@ -55,6 +55,7 @@ int mm_acct_save_TAUTH(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_f
     char sql[512] = { 0 };
     char phone_number_string[21] = { 0 };
     char card_number_string[25] = { 0 };
+    char card_number_masked[25] = { 0 };
     char call_type_str[38] = { 0 };
     char received_time_str[16] = { 0 };
     int exp_year;
@@ -63,6 +64,7 @@ int mm_acct_save_TAUTH(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_f
         sizeof(auth_request->phone_number));
     phone_num_to_string(card_number_string, sizeof(card_number_string), auth_request->card_number,
         sizeof(auth_request->card_number));
+    mask_pan(card_number_string, card_number_masked, sizeof(card_number_masked));
     call_type_to_string(auth_request->call_type & (~FLAG_CDR_IXL), call_type_str, sizeof(call_type_str));
 
     /* Some calling cards do not contain an expiration date, and the terminal returns 0xee
@@ -79,15 +81,14 @@ int mm_acct_save_TAUTH(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_f
         exp_year = 0x2000 + auth_request->exp_yy; /* Fixme: in 2100 */
     }
 
-    printf("\t\tCard Auth request: Terminal: %s, Phone number: %s, seq=%d, card#: %s, exp: %02x/%04x, service_code: %d, PIN: %02x, ctrlflag: 0x%02x carrier: %d, Call_type: 0x%02x (%s,) card_ref_num:0x%02x, unk:0x%04x, unk2:0x%04x\n",
+    printf("\t\tCard Auth request: Terminal: %s, Phone number: %s, seq=%d, card#: %s, exp: %02x/%04x, service_code: %d, PIN: ****, ctrlflag: 0x%02x carrier: %d, Call_type: 0x%02x (%s,) card_ref_num:0x%02x, unk:0x%04x, unk2:0x%04x\n",
         terminal_id,
         phone_number_string,
         auth_request->seq,
-        card_number_string,
+        card_number_masked,
         auth_request->exp_mm,
         exp_year,
         auth_request->service_code,
-        ((auth_request->pin & 0xFF) << 8) | ((auth_request->pin & 0xFF00) >> 8),
         auth_request->control_flag,
         auth_request->carrier_ref,
         auth_request->call_type,
@@ -97,6 +98,11 @@ int mm_acct_save_TAUTH(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_f
         auth_request->unknown2);
 
 
+    /* CARDMAN integration: CARD_NUMBER is masked (first6****last4) and PIN
+     * is dropped entirely, never persisted locally. See mask_pan() in
+     * mm_util.c and CDR_CONTRACT_SCOPING.md / INTEGRATION_PROPOSAL.md in
+     * the mm-cardman-integration repo.
+     */
     snprintf(sql, sizeof(sql), "INSERT " SQL_IGNORE "INTO TAUTH ( TERMINAL_ID, RECEIVED_DATE, RECEIVED_TIME,"
         "INTERNATIONAL_CALL_IND,"
         "CALLED_TELEPHONE_NO,"
@@ -108,20 +114,19 @@ int mm_acct_save_TAUTH(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_f
         "DISCRETIONARY,"
         "SPARE_FORMATTED,"
         "CARD_DATA,"
-        "PIN,"
         "CALL_TYPE,"
         "CARD_REF_NO,"
         "SEQUENCE_NO,"
         "FOLLOW_ON_IND,"
         "TELCO_ID, REGION_CODE"
         ") VALUES ( " \
-        " \"%s\",%s,%d,\"%s\",%d,\"%s\",%d,%04x%02x,%04x%02x,%d,%d,%d,%d,%d,%d,%d,%d," TELCO_ID_REGION_CODE ");",
+        " \"%s\",%s,%d,\"%s\",%d,\"%s\",%d,%04x%02x,%04x%02x,%d,%d,%d,%d,%d,%d,%d," TELCO_ID_REGION_CODE ");",
         terminal_id,
         received_time_to_db_string(received_time_str, sizeof(received_time_str)),
         0,
         phone_number_string,
         auth_request->carrier_ref,
-        card_number_string,
+        card_number_masked,
         auth_request->service_code,
         exp_year,
         auth_request->exp_mm,
@@ -130,7 +135,6 @@ int mm_acct_save_TAUTH(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_f
         auth_request->control_flag,
         0,
         0,
-        ((auth_request->pin & 0xFF) << 8) | ((auth_request->pin & 0xFF00) >> 8),
         auth_request->call_type,
         auth_request->card_ref_num,
         auth_request->seq,
@@ -169,7 +173,16 @@ int mm_acct_save_TCDR(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_ca
     char received_time_str[16] = { 0 };
     char phone_number_string[21];
     char card_number_string[21];
+    char card_number_masked[21];
     char call_type_str[38];
+
+    phone_num_to_string(phone_number_string, sizeof(phone_number_string), cdr->called_num,
+        sizeof(cdr->called_num));
+    /* CARDMAN integration: CARD_NUMBER is masked (first6****last4) in every
+     * log and local persistence, per mask_pan() in mm_util.c. */
+    phone_num_to_string(card_number_string, sizeof(card_number_string), cdr->card_num,
+        sizeof(cdr->card_num));
+    mask_pan(card_number_string, card_number_masked, sizeof(card_number_masked));
 
     printf(
         "\t\tCDR: %s, Duration: %02d:%02d:%02d call_type: 0x%02x (%s), DN: %s, Card#: %s, Collected: $%6.2f, Requested: $%6.2f, carrier code=%d, rate_type=%d, card_ref=0x%02x, unknown=0x%02x, Seq: %04d\n",
@@ -179,10 +192,8 @@ int mm_acct_save_TCDR(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_ca
         cdr->call_duration[2],
         cdr->call_type,
         call_type_to_string(cdr->call_type & (~FLAG_CDR_IXL), call_type_str, sizeof(call_type_str)),
-        phone_num_to_string(phone_number_string, sizeof(phone_number_string), cdr->called_num,
-            sizeof(cdr->called_num)),
-        phone_num_to_string(card_number_string, sizeof(card_number_string), cdr->card_num,
-            sizeof(cdr->card_num)),
+        phone_number_string,
+        card_number_masked,
         (float)cdr->call_cost[0] / 100,
         (float)cdr->call_cost[1] / 100,
         cdr->carrier_code,
@@ -210,10 +221,8 @@ int mm_acct_save_TCDR(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt_ca
         cdr->call_duration[2],
         cdr->call_type,
         call_type_to_string(cdr->call_type & (~FLAG_CDR_IXL), call_type_str, sizeof(call_type_str)),
-        phone_num_to_string(phone_number_string, sizeof(phone_number_string), cdr->called_num,
-                            sizeof(cdr->called_num)),
-        phone_num_to_string(card_number_string,  sizeof(card_number_string),  cdr->card_num,
-                            sizeof(cdr->card_num)),
+        phone_number_string,
+        card_number_masked,
         (float)cdr->call_cost[1] / 100,
         (float)cdr->call_cost[0] / 100,
         cdr->carrier_code,
@@ -451,16 +460,16 @@ int mm_acct_save_TOPCODE(void *db, mm_telco_t *telco, char* terminal_id, dlog_mt
     char sql[256] = { 0 };
     char received_time_str[16] = { 0 };
 
-    printf("\t\tMaintenance Type: %d (0x%03x) Access PIN: %02x%02x%01x\n",
-        maint->type, maint->type,
-        maint->access_pin[0], maint->access_pin[1], (maint->access_pin[2] & 0xF0) >> 4);
+    /* CARDMAN integration: no plaintext PIN, ever - the craft/maintenance
+     * access PIN is redacted here too, not just the cardholder PIN. */
+    printf("\t\tMaintenance Type: %d (0x%03x) Access PIN: ****\n",
+        maint->type, maint->type);
 
     snprintf(sql, sizeof(sql), "INSERT INTO TOPCODE ( TERMINAL_ID,RECEIVED_DATE,RECEIVED_TIME,OP_CODE,PIN,TELCO_ID,REGION_CODE ) VALUES ( " \
-                               " \"%s\",%s,%d,\" %02x%02x%01x\", " TELCO_ID_REGION_CODE ")",
+                               " \"%s\",%s,%d,\"****\", " TELCO_ID_REGION_CODE ")",
         terminal_id,
         received_time_to_db_string(received_time_str, sizeof(received_time_str)),
         maint->type,
-        maint->access_pin[0], maint->access_pin[1], (maint->access_pin[2] & 0xF0) >> 4,
         telco->id[0], telco->id[1],
         telco->region_code[0], telco->region_code[1], telco->region_code[2]);
 
@@ -814,7 +823,9 @@ int mm_acct_create_tables(void *db) {
         "DISCRETIONARY SMALLINT,"
         "SPARE_FORMATTED VARCHAR(2),"
         "CARD_DATA VARCHAR(40),"
-        "PIN VARCHAR(5),"
+        /* PIN column intentionally removed: CARDMAN integration requires
+         * PIN never be persisted locally, only cross the wire once in the
+         * authorize request to the WAPI bridge. */
         "CALL_TYPE TINYINT,"
         "CARD_REF_NO TINYINT,"
         "SEQUENCE_NO SMALLINT,"

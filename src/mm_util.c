@@ -101,6 +101,25 @@ extern char* phone_num_to_string(char *string_buf, size_t string_buf_len, uint8_
     return string_buf;
 }
 
+/* Mask a card number string to first6****last4 for logging/persistence.
+ * CARDMAN integration requirement: no full PAN outside the wire to the
+ * WAPI bridge. See CDR_CONTRACT_SCOPING.md / INTEGRATION_PROPOSAL.md in
+ * the mm-cardman-integration repo.
+ */
+extern char* mask_pan(const char *card_number_string, char *string_buf, size_t string_buf_len) {
+    size_t len = strlen(card_number_string);
+
+    if (len < 10 || string_buf_len < 15) {
+        snprintf(string_buf, string_buf_len, "%s", "****");
+        return string_buf;
+    }
+
+    snprintf(string_buf, string_buf_len, "%.6s****%s",
+        card_number_string, card_number_string + (len - 4));
+
+    return string_buf;
+}
+
 /* Convert NULL terminated string to packed BCD (0 digits replaced with 0xa) */
 extern uint8_t string_to_bcd_a(char *number_string, uint8_t *buffer, uint8_t buff_len) {
     uint8_t i;
