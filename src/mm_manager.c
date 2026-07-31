@@ -32,6 +32,7 @@
 #include "mm_manager.h"
 #include "mm_serial.h"
 #include "mm_udp.h"
+#include "mm_cardman_bridge.h"
 
 #define JAN12020 1577865600
 
@@ -1081,9 +1082,7 @@ static int process_mm_table(mm_context_t* context, mm_table_t* table) {
             case DLOG_MT_FUNF_CARD_AUTH: {
                 dlog_mt_auth_resp_code_t  auth_response = { DLOG_MT_AUTH_RESP_CODE, 0 , 0, { 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x41, 0x42 }};
                 dlog_mt_funf_card_auth_t *auth_request  = (dlog_mt_funf_card_auth_t *)ppayload;
-                time_t rawtime;
 
-                mm_time(context->test_mode, &rawtime);
                 ppayload += sizeof(dlog_mt_funf_card_auth_t);
 
                 /* Perform endian conversion */
@@ -1095,8 +1094,50 @@ static int process_mm_table(mm_context_t* context, mm_table_t* table) {
 
                 mm_acct_save_TAUTH(context->database, &context->telco, terminal_id, auth_request);
 
-                auth_response.resp_code = 0;
-                auth_response.auth_code = rawtime;
+                /* CARDMAN integration: the authorization decision belongs
+                 * to CARDMAN, not this terminal manager. Call the bridge
+                 * instead of hardcoding approval - fail closed on any
+                 * bridge error. See INTEGRATION_PROPOSAL.md section 1a /
+                 * SOW.md Phase 1 in the mm-cardman-integration repo.
+                 *
+                 * The full (unmasked) PAN/PIN cross the wire to the
+                 * bridge here ONLY - this is the one deliberate exception
+                 * to "no full PAN/PIN outside the wire" and matches what
+                 * mm_acct_save_TAUTH() above already received before
+                 * masking for local storage.
+                 */
+                {
+                    char pan_string[25]      = { 0 };
+                    char pin_string[8]       = { 0 };
+                    char called_number[21]   = { 0 };
+                    cardman_auth_request_t   bridge_req = { 0 };
+                    cardman_auth_result_t    bridge_result = { 0 };
+
+                    phone_num_to_string(pan_string, sizeof(pan_string), auth_request->card_number,
+                        sizeof(auth_request->card_number));
+                    phone_num_to_string(called_number, sizeof(called_number), auth_request->phone_number,
+                        sizeof(auth_request->phone_number));
+                    /* PIN nibbles are BCD digits, same convention the
+                     * original stub used for its %02x debug print. */
+                    snprintf(pin_string, sizeof(pin_string), "%04x",
+                        ((auth_request->pin & 0xFF) << 8) | ((auth_request->pin & 0xFF00) >> 8));
+
+                    bridge_req.pan = pan_string;
+                    bridge_req.pin = pin_string;
+                    bridge_req.called_number = called_number;
+                    bridge_req.service_code = auth_request->service_code;
+                    bridge_req.terminal_id = terminal_id;
+
+                    cardman_bridge_authorize(&bridge_req, &bridge_result);
+
+                    if (bridge_result.approved) {
+                        auth_response.resp_code = 0;    /* 0 = card valid, per dlog_mt_auth_resp_code_t */
+                        auth_response.auth_code = bridge_result.auth_code;
+                    } else {
+                        auth_response.resp_code = 1;    /* otherwise = card invalid / declined */
+                        auth_response.auth_code = 0;
+                    }
+                }
 
                 printf("\t\tSending auth response: Response code: 0x%02x, Authorization code: %" PRIu64 "\n",
                     auth_response.resp_code,

@@ -48,3 +48,4 @@ out/
 .vs/
 *.bin
 .vscode/
+build/
