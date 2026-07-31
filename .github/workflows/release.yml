@@ -16,11 +16,12 @@ permissions:
   contents: write # Needed for gh release commands
 
 jobs:
-  # This job only runs on push events to create the pre-release
+  # This job runs on push and manual (workflow_dispatch) events to
+  # create the pre-release. 'release' events already have a release -
+  # that's what triggered the workflow - so this job skips for those.
   prepare_release:
-    name: Create Pre-Release (on push)
-    # Conditionally run this job only if the event is 'push'
-    if: github.event_name == 'push'
+    name: Create Pre-Release (on push or manual dispatch)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       # Output the upload URL and the generated tag for the build job
@@ -46,14 +47,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ steps.get_tag.outputs.tag }}
         run: |
-          echo "Creating pre-release for tag $TAG_NAME"
-          # Create the pre-release using the generated tag
-          # Use --repo to be explicit, reducing reliance on local .git context, but checkout is still best practice
-          gh release create "$TAG_NAME" \
-            --repo "${{ github.repository }}" \
-            --title "Pre-release (commit ${{ github.sha }})" \
-            --notes "Automated pre-release based on commit ${{ github.sha }}. Contains build artifacts for Linux (glibc + static/musl - the static build runs on any distro), macOS, and Windows (x64/x86)." \
-            --prerelease # Mark it as a pre-release
+          # Idempotent: a workflow_dispatch re-run on a commit that
+          # already has a pre-release (e.g. re-running after a build
+          # fix with no new commit) should reuse it, not fail with
+          # "release already exists" - matches this workflow's own
+          # "Create or Update" name, which the original version of this
+          # step didn't actually implement.
+          if gh release view "$TAG_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TAG_NAME already exists, reusing it."
+          else
+            echo "Creating pre-release for tag $TAG_NAME"
+            gh release create "$TAG_NAME" \
+              --repo "${{ github.repository }}" \
+              --title "Pre-release (commit ${{ github.sha }})" \
+              --notes "Automated pre-release based on commit ${{ github.sha }}. Contains build artifacts for Linux (glibc + static/musl - the static build runs on any distro), macOS, and Windows (x64/x86)." \
+              --prerelease # Mark it as a pre-release
+          fi
 
       # Get the upload URL (optional, but good practice if needed elsewhere)
       - name: Get Release Upload URL
@@ -77,6 +86,10 @@ jobs:
     if: success() || needs.prepare_release.result == 'skipped'
     runs-on: ${{ matrix.os }}
     strategy:
+      # Don't cancel every other platform's build just because one
+      # target failed - defeats the purpose of a multi-platform release
+      # matrix (you'd get zero assets instead of N-1).
+      fail-fast: false
       matrix:
         include:
           # glibc build: dynamically linked against whatever glibc version
