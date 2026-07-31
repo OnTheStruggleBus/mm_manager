@@ -8,6 +8,79 @@
 [![Coverity](https://scan.coverity.com/projects/20341/badge.svg)](https://scan.coverity.com/projects/hharte-mm_manager)
 
 
+# About this fork
+
+This is a fork of [`hharte/mm_manager`](https://github.com/hharte/mm_manager)
+(the original, unmodified upstream — go there if you just want the base
+project). This fork exists to evaluate and prototype `mm_manager` as a
+physical-terminal front-end for **CARDMAN**, a hobby-scale prepaid
+calling-card issuer back-office. Full research, architecture decisions, and
+open questions live in a separate repo:
+[`OnTheStruggleBus/-mm-cardman-integration`](https://github.com/OnTheStruggleBus/-mm-cardman-integration)
+(see its `INTEGRATION_PROPOSAL.md`, `SOW.md`, and `CDR_CONTRACT_SCOPING.md`).
+
+**Status: prototype, not production.** Verified by build (`-Wall -Wextra
+-Werror` clean on every platform) and by real end-to-end tests against a
+stub/mock CARDMAN bridge — **not yet** against a live CARDMAN instance or a
+real/replayed DLOG session with physical Nortel Millennium hardware. See the
+integration repo's `SOW.md` for exactly what's proven vs. still open,
+including an unresolved question about whether the wire protocol supports a
+mid-call cutoff/credit-limit signal (this front-end, unlike the project's
+existing Asterisk-based integration, never sits in the live call path, so it
+structurally can't enforce a balance cutoff mid-call the way that one can —
+see the integration repo's session history for the full writeup).
+
+## What's actually different from upstream
+
+Two upstream issues blocked any CARDMAN-facing use of `mm_manager` as-is,
+and both are patched here:
+
+- **The card-authorization handler used to unconditionally approve every
+  request** (`DLOG_MT_FUNF_CARD_AUTH`, `mm_manager.c`) with no real balance
+  check — this fork replaces that with a call to an external CARDMAN bridge
+  process (`mm_cardman_bridge.c`/`.h`, new files), which fails closed on
+  any bridge error, timeout, or malformed response instead of ever
+  defaulting to approved. The CDR handler (`DLOG_MT_CALL_DETAILS`) is wired
+  the same way, submitting call detail records to the bridge for real
+  settlement instead of only logging them locally.
+- **Full card numbers and plaintext PINs used to be persisted to local
+  SQLite and stdout** (`mm_accounting.c`, tables `TAUTH`/`TCDR`/`TOPCODE`)
+  — this fork masks card numbers to `first6****last4` everywhere they're
+  logged or stored, and drops PINs (both the cardholder PIN and the
+  terminal's own craft/maintenance access PIN) from local persistence
+  entirely. The full, unmasked PAN and PIN still cross the wire to the
+  bridge exactly once, in the authorize request — that's the one
+  deliberate exception, matching how the bridge is meant to be used.
+
+Everything else (the DLOG table protocol, rating, LCD/NPA-NXX tables, alarms,
+cash-box handling, etc.) is unmodified upstream behavior. Of the 78 DLOG
+table types defined in this codebase, only the 9 related to card auth,
+CDR/call-detail, and payment records are touched by this fork — the other
+69 (config, stats, display, rate tables, and so on) are untouched and stay
+purely local, same as upstream.
+
+None of this talks to a real CARDMAN instance yet — a companion bridge
+process (`bridge/cardman_bridge.py` in the integration repo above) is what
+actually calls CARDMAN's WAPI; this fork just calls out to it instead of
+deciding locally. Point `CARDMAN_BRIDGE_ADDR` (env var, default
+`127.0.0.1:8420`) at wherever that bridge is running.
+
+## CI / releases
+
+This fork's `.github/workflows/release.yml` differs from upstream: it
+builds an additional **statically-linked Linux target** (`Linux-x64-static`,
+via musl/Alpine) alongside the existing dynamic glibc build — the static one
+has no runtime dependency on the host's glibc version at all, so it's the
+one to grab if you're not sure which Linux binary to use. It also supports
+manually triggering a release build (`workflow_dispatch`) without needing a
+new commit, and fixes an asset-naming collision that existed upstream
+between same-OS build targets.
+
+See [PRs #1–#4](https://github.com/OnTheStruggleBus/mm_manager/pulls?q=is%3Apr+is%3Amerged)
+for the full change history and reasoning behind each patch.
+
+---
+
 # Overview
 
 The Nortel Millennium payphones utilize a Manager to facilitate installation, reporting, call cost rating, and credit card processing.  This Millennium payphone calls into the Manager using a 1200-baud phone modem.  Unlike some other COCOT payphones, the Manager **_never calls the payphone_**.
