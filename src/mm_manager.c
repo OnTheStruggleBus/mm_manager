@@ -32,7 +32,7 @@
 #include "mm_manager.h"
 #include "mm_serial.h"
 #include "mm_udp.h"
-#include "mm_cardman_bridge.h"
+#include "mm_cardman.h"
 
 #define JAN12020 1577865600
 
@@ -785,8 +785,8 @@ static int process_mm_table(mm_context_t* context, mm_table_t* table) {
 
                 /* Perform endian conversion */
                 cdr->seq = LE16(cdr->seq);
-                cdr->call_cost[0] = LE16(cdr->call_cost[0]);
-                cdr->call_cost[1] = LE16(cdr->call_cost[1]);
+                cdr->call_cost[0] = LE32(cdr->call_cost[0]);
+                cdr->call_cost[1] = LE32(cdr->call_cost[1]);
                 /* auth_code was never byte-swapped upstream (only ever
                  * used for CDR_DEBUG printing before this integration) -
                  * now that it's used to match a real CARDMAN hold, it
@@ -796,51 +796,11 @@ static int process_mm_table(mm_context_t* context, mm_table_t* table) {
 
                 mm_acct_save_TCDR(context->database, &context->telco, terminal_id, cdr);
 
-                /* CARDMAN integration: submit this CDR to the bridge for
-                 * real settlement via CDRI, not just local TCDR logging.
-                 * Not fail-closed - the call already happened, a bridge
-                 * failure here is logged, not a reason to alter terminal
-                 * behavior. See CDR_CONTRACT_SCOPING.md in the
-                 * mm-cardman-integration repo for the field mapping.
+                /* CARDMAN integration: forward a CARDMAN-authorized CDR,
+                 * answered or not, to the bridge for settlement via CDRI.
+                 * The ACK below is still unconditional (G1 / task T7).
                  */
-                {
-                    char cdr_id[64]        = { 0 };
-                    char auth_code_hex[20] = { 0 };
-                    char pan_string[25]    = { 0 };
-                    char called_number[21] = { 0 };
-                    char start_ts[32]      = { 0 };
-                    cardman_cdr_request_t  cdr_req = { 0 };
-                    uint32_t duration_secs;
-
-                    snprintf(cdr_id, sizeof(cdr_id), "mm-%s-%u", terminal_id, cdr->seq);
-                    snprintf(auth_code_hex, sizeof(auth_code_hex), "%08" PRIX64, cdr->auth_code);
-
-                    phone_num_to_string(pan_string, sizeof(pan_string), cdr->card_num, sizeof(cdr->card_num));
-                    phone_num_to_string(called_number, sizeof(called_number), cdr->called_num,
-                        sizeof(cdr->called_num));
-
-                    /* start_timestamp fields are (year-1900, month, day,
-                     * hour, min, sec), same convention mm_acct_save_TCDR()
-                     * above already uses via timestamp_to_db_string(). */
-                    snprintf(start_ts, sizeof(start_ts), "%04d-%02d-%02dT%02d:%02d:%02dZ",
-                        cdr->start_timestamp[0] + 1900, cdr->start_timestamp[1], cdr->start_timestamp[2],
-                        cdr->start_timestamp[3], cdr->start_timestamp[4], cdr->start_timestamp[5]);
-
-                    /* call_duration is (hours, minutes, seconds), same
-                     * convention mm_acct_save_TCDR() above already uses. */
-                    duration_secs = (uint32_t)cdr->call_duration[0] * 3600U
-                                  + (uint32_t)cdr->call_duration[1] * 60U
-                                  + (uint32_t)cdr->call_duration[2];
-
-                    cdr_req.cdr_id = cdr_id;
-                    cdr_req.auth_code = auth_code_hex;
-                    cdr_req.pan = pan_string;
-                    cdr_req.called_number = called_number;
-                    cdr_req.duration_secs = duration_secs;
-                    cdr_req.start_ts = start_ts;
-
-                    cardman_bridge_submit_cdr(&cdr_req);
-                }
+                cardman_forward_cdr(terminal_id, cdr);
 
                 /* If terminal is transferring multiple tables, queue the CDR response for later, after receiving DLOG_MT_END_DATA */
                 if (context->trans_data_in_progress == 1) {
@@ -1147,48 +1107,17 @@ static int process_mm_table(mm_context_t* context, mm_table_t* table) {
                 mm_acct_save_TAUTH(context->database, &context->telco, terminal_id, auth_request);
 
                 /* CARDMAN integration: the authorization decision belongs
-                 * to CARDMAN, not this terminal manager. Call the bridge
-                 * instead of hardcoding approval - fail closed on any
-                 * bridge error. See INTEGRATION_PROPOSAL.md section 1a /
-                 * SOW.md Phase 1 in the mm-cardman-integration repo.
-                 *
-                 * The full (unmasked) PAN/PIN cross the wire to the
-                 * bridge here ONLY - this is the one deliberate exception
-                 * to "no full PAN/PIN outside the wire" and matches what
-                 * mm_acct_save_TAUTH() above already received before
-                 * masking for local storage.
+                 * to CARDMAN, not this terminal manager. Fails closed on
+                 * any bridge error. The full PAN/PIN cross the loopback
+                 * wire to the bridge only (AI/SECURITY_RULES.md rule 3).
                  */
                 {
-                    char pan_string[25]      = { 0 };
-                    char pin_string[8]       = { 0 };
-                    char called_number[21]   = { 0 };
-                    cardman_auth_request_t   bridge_req = { 0 };
-                    cardman_auth_result_t    bridge_result = { 0 };
+                    uint8_t  resp_code;
+                    uint64_t auth_code;
 
-                    phone_num_to_string(pan_string, sizeof(pan_string), auth_request->card_number,
-                        sizeof(auth_request->card_number));
-                    phone_num_to_string(called_number, sizeof(called_number), auth_request->phone_number,
-                        sizeof(auth_request->phone_number));
-                    /* PIN nibbles are BCD digits, same convention the
-                     * original stub used for its %02x debug print. */
-                    snprintf(pin_string, sizeof(pin_string), "%04x",
-                        ((auth_request->pin & 0xFF) << 8) | ((auth_request->pin & 0xFF00) >> 8));
-
-                    bridge_req.pan = pan_string;
-                    bridge_req.pin = pin_string;
-                    bridge_req.called_number = called_number;
-                    bridge_req.service_code = auth_request->service_code;
-                    bridge_req.terminal_id = terminal_id;
-
-                    cardman_bridge_authorize(&bridge_req, &bridge_result);
-
-                    if (bridge_result.approved) {
-                        auth_response.resp_code = 0;    /* 0 = card valid, per dlog_mt_auth_resp_code_t */
-                        auth_response.auth_code = bridge_result.auth_code;
-                    } else {
-                        auth_response.resp_code = 1;    /* otherwise = card invalid / declined */
-                        auth_response.auth_code = 0;
-                    }
+                    cardman_authorize_funf(terminal_id, auth_request, &resp_code, &auth_code);
+                    auth_response.resp_code = resp_code;
+                    auth_response.auth_code = auth_code;
                 }
 
                 printf("\t\tSending auth response: Response code: 0x%02x, Authorization code: %" PRIu64 "\n",

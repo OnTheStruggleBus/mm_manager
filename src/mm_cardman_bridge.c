@@ -20,8 +20,14 @@
 #include <unistd.h>
 #include <errno.h>
 
-#define CARDMAN_BRIDGE_TIMEOUT_SEC 3
+/* Above the bridge's own budget (CAUT has a 3 s route timeout and the
+ * bridge retries once), well under the terminal's 40 s
+ * card_auth_required_timeout. A client timeout shorter than the bridge's
+ * would decline calls CARDMAN approved, leaving an orphaned hold.
+ */
+#define CARDMAN_BRIDGE_TIMEOUT_SEC 10
 #define CARDMAN_BRIDGE_BUF_SIZE    2048
+#define CARDMAN_BRIDGE_REQ_SIZE    1024
 
 /* Split "host:port" (from CARDMAN_BRIDGE_ADDR or the built-in default)
  * into separate strings. Returns 0 on success.
@@ -79,9 +85,10 @@ static int connect_with_timeout(const char *host, const char *port) {
     return fd;
 }
 
-/* Very small helper: find "key":"value" or "key":literal in a JSON-ish
- * buffer and copy the value out. Not a general JSON parser - the Phase 1
- * stub bridge's response shape is fixed and small by design.
+/* Very small helper: find "key":"value" in a JSON-ish buffer and copy
+ * the value out. Not a general JSON parser - the bridge's response shape
+ * is fixed and small by design. A value that does not fit is an error,
+ * never truncated: a truncated auth_code would look valid.
  */
 static int extract_json_string(const char *body, const char *key, char *out, size_t out_len) {
     char needle[64];
@@ -107,7 +114,7 @@ static int extract_json_string(const char *body, const char *key, char *out, siz
 
     size_t len = (size_t)(end - p);
     if (len >= out_len) {
-        len = out_len - 1;
+        return -1;
     }
 
     memcpy(out, p, len);
@@ -139,12 +146,32 @@ static int extract_json_bool(const char *body, const char *key, int *out) {
     return -1;
 }
 
+/* 1 if s is non-NULL and every character is in allowed (an empty string
+ * passes only when allow_empty is set). Everything placed in a JSON
+ * string below goes through this, so no quote, backslash or control
+ * character can reach the request body.
+ */
+static int chars_ok(const char *s, const char *allowed, int allow_empty) {
+    if (s == NULL) {
+        return 0;
+    }
+    if (s[0] == '\0') {
+        return allow_empty;
+    }
+    return strspn(s, allowed) == strlen(s);
+}
+
+#define DIGITS    "0123456789"
+#define AC_CHARS  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+#define TS_CHARS  "0123456789-:TZ"
+#define ID_CHARS  "0123456789-:TZm"
+
 /* Shared POST plumbing for /authorize and /cdr: connects to
  * CARDMAN_BRIDGE_ADDR (or the built-in default), sends request_body as
  * the JSON body of a POST to path, and copies the response body (past
- * the HTTP headers) into out_body/out_body_len. Returns 0 on any
- * well-formed HTTP response (caller still checks the JSON payload),
- * -1 on any transport-level failure - both cases already logged with
+ * the HTTP headers) into out_body/out_body_len. Returns 0 only for an
+ * HTTP 200 response (caller still checks the JSON payload), -1 on any
+ * transport failure or other status - both cases already logged with
  * the given log_prefix.
  */
 static int bridge_http_post(const char *path, const char *request_body, const char *log_prefix,
@@ -152,7 +179,7 @@ static int bridge_http_post(const char *path, const char *request_body, const ch
     char addr[128];
     char host[64];
     char port[16];
-    char http_request[768];
+    char http_request[CARDMAN_BRIDGE_REQ_SIZE + 256];
     char response[CARDMAN_BRIDGE_BUF_SIZE] = { 0 };
     int fd;
     ssize_t total_read = 0;
@@ -211,6 +238,12 @@ static int bridge_http_post(const char *path, const char *request_body, const ch
     }
     response[total_read] = '\0';
 
+    /* Status line must be exactly "HTTP/1.x 200 ...". */
+    if (strncmp(response, "HTTP/1.", 7) != 0 || strncmp(response + 8, " 200", 4) != 0) {
+        fprintf(stderr, "%s: bridge answered a non-200 status, failing closed.\n", log_prefix);
+        return -1;
+    }
+
     char *body = strstr(response, "\r\n\r\n");
     if (body == NULL) {
         fprintf(stderr, "%s: malformed HTTP response, failing closed.\n", log_prefix);
@@ -223,18 +256,34 @@ static int bridge_http_post(const char *path, const char *request_body, const ch
 }
 
 int cardman_bridge_authorize(const cardman_auth_request_t *req, cardman_auth_result_t *result) {
-    char request_body[512];
+    char request_body[CARDMAN_BRIDGE_REQ_SIZE];
     char response_body[CARDMAN_BRIDGE_BUF_SIZE];
+    int  len;
 
     /* Fail closed by default; only flip to approved on a fully validated
      * bridge response below.
      */
     result->approved = 0;
-    result->auth_code = 0;
+    result->auth_code[0] = '\0';
 
-    snprintf(request_body, sizeof(request_body),
-        "{\"pan\":\"%s\",\"pin\":\"%s\",\"service_code\":\"%u\",\"called_number\":\"%s\",\"terminal_id\":\"%s\"}",
-        req->pan, req->pin, req->service_code, req->called_number, req->terminal_id);
+    if (!chars_ok(req->pan, DIGITS, 0) || !chars_ok(req->pin, DIGITS, 0) ||
+        !chars_ok(req->called_number, DIGITS, 1) || !chars_ok(req->terminal_id, DIGITS, 0) ||
+        !chars_ok(req->phone_number, DIGITS, 0) || !chars_ok(req->requested_at, TS_CHARS, 0)) {
+        fprintf(stderr, "cardman_bridge_authorize: request field failed validation, failing closed.\n");
+        return -1;
+    }
+
+    len = snprintf(request_body, sizeof(request_body),
+        "{\"pan\":\"%s\",\"pin\":\"%s\",\"service_code\":\"%u\",\"called_number\":\"%s\","
+        "\"terminal_id\":\"%s\",\"phone_number\":\"%s\",\"seq_num\":%u,\"requested_at\":\"%s\","
+        "\"call_type\":%u,\"international\":\"%s\"}",
+        req->pan, req->pin, req->service_code, req->called_number,
+        req->terminal_id, req->phone_number, req->seq_num, req->requested_at,
+        req->call_type, req->international ? "yes" : "no");
+    if (len < 0 || (size_t)len >= sizeof(request_body)) {
+        fprintf(stderr, "cardman_bridge_authorize: request too large, failing closed.\n");
+        return -1;
+    }
 
     if (bridge_http_post("/authorize", request_body, "cardman_bridge_authorize",
                           response_body, sizeof(response_body)) != 0) {
@@ -252,42 +301,63 @@ int cardman_bridge_authorize(const cardman_auth_request_t *req, cardman_auth_res
         return 0;
     }
 
-    char auth_code_hex[32];
-    if (extract_json_string(response_body, "auth_code", auth_code_hex, sizeof(auth_code_hex)) != 0) {
-        fprintf(stderr, "cardman_bridge_authorize: approved with no auth_code, failing closed.\n");
+    char auth_code[16];
+    if (extract_json_string(response_body, "auth_code", auth_code, sizeof(auth_code)) != 0) {
+        fprintf(stderr, "cardman_bridge_authorize: approved with no usable auth_code, failing closed.\n");
         return -1;
     }
 
-    /* CAUT's auth_code is an 8-hex-char (32-bit) string; hex-decode into
-     * the low 32 bits of the wire uint64_t, per INTEGRATION_PROPOSAL.md
-     * section 3.
+    /* CAUT's auth_code is exactly 8 chars of [0-9A-Z] (auth.rexx
+     * DERIVE_AC), not hex.
      */
-    result->auth_code = (uint64_t)strtoul(auth_code_hex, NULL, 16);
+    if (strlen(auth_code) != 8 || !chars_ok(auth_code, AC_CHARS, 0)) {
+        fprintf(stderr, "cardman_bridge_authorize: malformed auth_code, failing closed.\n");
+        return -1;
+    }
+
+    snprintf(result->auth_code, sizeof(result->auth_code), "%s", auth_code);
     result->approved = 1;
     return 0;
 }
 
 int cardman_bridge_submit_cdr(const cardman_cdr_request_t *req) {
-    char request_body[512];
+    char request_body[CARDMAN_BRIDGE_REQ_SIZE];
     char response_body[CARDMAN_BRIDGE_BUF_SIZE];
+    int  len;
 
-    if (req->start_ts != NULL && req->start_ts[0] != '\0') {
-        snprintf(request_body, sizeof(request_body),
-            "{\"cdr_id\":\"%s\",\"auth_code\":\"%s\",\"pan\":\"%s\",\"called_number\":\"%s\","
-            "\"duration_secs\":%u,\"start_ts\":\"%s\"}",
-            req->cdr_id, req->auth_code, req->pan, req->called_number, req->duration_secs, req->start_ts);
-    } else {
-        snprintf(request_body, sizeof(request_body),
-            "{\"cdr_id\":\"%s\",\"auth_code\":\"%s\",\"pan\":\"%s\",\"called_number\":\"%s\","
-            "\"duration_secs\":%u}",
-            req->cdr_id, req->auth_code, req->pan, req->called_number, req->duration_secs);
+    if (!chars_ok(req->cdr_id, ID_CHARS, 0) || !chars_ok(req->auth_code, AC_CHARS, 0) ||
+        strlen(req->auth_code) != 8 || !chars_ok(req->pan, DIGITS, 0) ||
+        !chars_ok(req->called_number, DIGITS, 1) || !chars_ok(req->start_ts, TS_CHARS, 0) ||
+        !chars_ok(req->terminal_id, DIGITS, 0) || !chars_ok(req->phone_number, DIGITS, 0)) {
+        fprintf(stderr, "cardman_bridge_submit_cdr: request field failed validation, not sent.\n");
+        return -1;
     }
 
-    /* Not fail-closed in the authorization sense - the call already
-     * happened. bridge_http_post() already logs the specific failure.
-     */
-    return bridge_http_post("/cdr", request_body, "cardman_bridge_submit_cdr",
-                             response_body, sizeof(response_body));
+    len = snprintf(request_body, sizeof(request_body),
+        "{\"cdr_id\":\"%s\",\"auth_code\":\"%s\",\"pan\":\"%s\",\"called_number\":\"%s\","
+        "\"start_ts\":\"%s\",\"duration_secs\":%u,\"call_type\":%u,\"rate_type\":%u,"
+        "\"call_cost_collected\":%u,\"call_cost_requested\":%u,"
+        "\"terminal_id\":\"%s\",\"phone_number\":\"%s\",\"seq\":%u}",
+        req->cdr_id, req->auth_code, req->pan, req->called_number,
+        req->start_ts, req->duration_secs, req->call_type, req->rate_type,
+        req->call_cost_collected, req->call_cost_requested,
+        req->terminal_id, req->phone_number, req->seq);
+    if (len < 0 || (size_t)len >= sizeof(request_body)) {
+        fprintf(stderr, "cardman_bridge_submit_cdr: request too large, not sent.\n");
+        return -1;
+    }
+
+    if (bridge_http_post("/cdr", request_body, "cardman_bridge_submit_cdr",
+                          response_body, sizeof(response_body)) != 0) {
+        return -1;
+    }
+
+    int delivered = 0;
+    if (extract_json_bool(response_body, "delivered", &delivered) != 0) {
+        fprintf(stderr, "cardman_bridge_submit_cdr: no 'delivered' field in response.\n");
+        return -1;
+    }
+    return delivered ? 1 : 0;
 }
 
 #else /* _WIN32 */
@@ -298,7 +368,7 @@ int cardman_bridge_submit_cdr(const cardman_cdr_request_t *req) {
 int cardman_bridge_authorize(const cardman_auth_request_t *req, cardman_auth_result_t *result) {
     (void)req;
     result->approved = 0;
-    result->auth_code = 0;
+    result->auth_code[0] = '\0';
     fprintf(stderr, "cardman_bridge_authorize: Windows transport not implemented, failing closed.\n");
     return -1;
 }

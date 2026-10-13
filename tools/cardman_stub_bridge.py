@@ -28,13 +28,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             req = {}
 
-        print(f"stub bridge: received auth request for terminal_id={req.get('terminal_id')!r}, "
-              f"pan=***masked-in-log***, called_number={req.get('called_number')!r}")
+        print(f"stub bridge: {self.path} terminal_id={req.get('terminal_id')!r}, "
+              f"pan=***masked-in-log***, called_number={req.get('called_number')!r}, "
+              f"seq_num={req.get('seq_num')!r}, requested_at={req.get('requested_at')!r}, "
+              f"international={req.get('international')!r}")
 
-        if self.server.decline:
-            resp = {"approved": False}
+        if self.path == "/cdr":
+            resp = {"delivered": not self.server.decline, "state": "MATCHED"}
+        elif self.server.decline:
+            resp = {"approved": False, "disposition": "declined"}
         else:
-            resp = {"approved": True, "auth_code": "A1B2C3D4"}
+            # 8 chars of [0-9A-Z], the shape CARDMAN's DERIVE_AC produces.
+            resp = {"approved": True, "disposition": "approved", "auth_code": "A1B2C3D4"}
 
         payload = json.dumps(resp).encode("utf-8")
         self.send_response(200)

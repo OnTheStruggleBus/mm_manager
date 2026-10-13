@@ -23,52 +23,30 @@ The 2.5 contract check is `docs/cardman-compat/CARDMAN_2.5_ALIGNMENT.md`.
   call with BRICKS' tariff engine (CARDMAN ADR 8); an inbound
   `charge_cents` is required but only stored as `reported_charge_cents`.
   (The integration repo's bridge-side `RateCache` is superseded.)
-- **WAPI identity**: one per bridge deployment. CAUT allows
-  `platform,agi,admin,gate`; CDRI allows `mediation,agi,admin`. A new
-  group for this front end must not be named `millennium` (that is
-  CARDMAN's database binding name).
+- **WAPI identity**: one per bridge deployment, group `payphone`
+  (CARDMAN 2.5.0.1, ADR 40), granted CAUT and CDRI only.
 - **Smartcard**: out of scope (CARDMAN-side deferral).
 
-## Bridge contract used by `src/mm_cardman_bridge.c`
+## Bridge contract
 
-`POST /authorize`
-```json
-{"pan":"<digits>","pin":"<4 digits>","service_code":"<n>","called_number":"<digits>","terminal_id":"<digits>"}
-```
-Response: `{"approved": true, "auth_code": "A1B2C3D4"}` or
-`{"approved": false}`. Anything else is a decline.
+Specified in [`docs/cardman-compat/BRIDGE_CONTRACT.md`](../docs/cardman-compat/BRIDGE_CONTRACT.md)
+(CARDMAN 2.5.0.1, ADR 40). Fork side: `src/mm_cardman.c` (glue) and
+`src/mm_cardman_bridge.c` (HTTP client). Reference bridge:
+`tools/cardman_bridge.py`.
 
-**Incomplete for current CAUT** (task T13): CAUT also requires `seq_num`
-and `requested_at` (the `auth_code` is derived from `pan`, `seq_num`,
-`requested_at`, so retries must reuse the same `requested_at`), and uses
-`international` (`yes` from FUNF `call_type` low nibble 0x06) and a
-`terminal` object (`telco_id`, `terminal_id`, `phone_number`,
-`terminal_serial`). CAUT dispositions: `approved`, `approved_limited`
-(both map to wire "valid"), `requires_card`, `declined`, `bad_card`,
-`bad_country`, `no_tariff` (all "invalid").
-
-`POST /cdr`
-```json
-{"cdr_id":"mm-<terminal_id>-<seq>","auth_code":"<8 hex>","pan":"<digits>","called_number":"<digits>","duration_secs":132,"start_ts":"YYYY-MM-DDTHH:MM:SSZ"}
-```
-
-CDRI requires a 16-digit `pan` (or `dial_id`) and a non-negative
-`charge_cents`. CDRI response `state`: `MATCHED`, `LATE`, `UNMATCHED`,
-`DUPLICATE`, `MERGED`, `FILTERED` (< 3 s by default), `NOTARIFF`. Any
-well-formed response means CARDMAN owns the record (it retries
-`UNMATCHED`/`NOTARIFF` itself); only transport errors and `INTERNAL`
-should be retried by us.
-
-## Field mappings
-
-- `auth_code`: CAUT's 8-hex-char string decodes to the low 32 bits of
-  the wire `uint64_t` in `dlog_mt_auth_resp_code_t`; the CDR path
-  re-encodes it as `%08X`.
-- `cdr_id`: `mm-<terminal_id>-<seq>`; stable across retries, used for
-  idempotency.
-- `start_timestamp[6]`: (year-1900, month, day, hour, min, sec).
-  `call_duration[3]`: (h, m, s). Both still need confirmation against a
-  real terminal capture.
+- Identity: WAPI group `payphone`, cert CN = Basic-Auth userid =
+  `mm-<env>`. CAUT and CDRI only; `GET /api/rates` is 403.
+- Only CAUT `approved` is valid. `approved_limited` is invalid and its
+  hold is released with a zero-second CDR.
+- Send a CDR for **every** approved auth, answered or not: a CDR under
+  3 s is the only way to release a hold.
+- `auth_code` is 8 chars of `[0-9A-Z]` (base-36), carried as its numeric
+  value in the 64-bit wire field. Not hex.
+- `requested_at` must be identical on a retry of the same
+  `(terminal, seq)`, or CAUT places a second hold.
+- `cdr_id`: `mm-<terminal>-<seq>-<start_ts>` (UTC terminal start time).
+- 7-digit numbers are expanded with the payphone's NPA; CDRI rates any
+  non-NANP-shaped number as INTL.
 
 ## Protocol limits that shape CARDMAN's side
 
