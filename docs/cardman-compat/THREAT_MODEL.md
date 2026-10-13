@@ -38,7 +38,10 @@ mm_manager process in this fork. Line numbers at commit `3e173a3`.
    given. CARDMAN should treat `terminal_id` as a claim, and the bridge
    should allow-list known terminals.
 2. mm_manager <-> bridge: same host, loopback. Must not cross a host.
-3. Bridge <-> CARDMAN: mTLS + Basic auth (integration repo).
+3. Bridge <-> CARDMAN: mTLS + Basic auth (integration repo). CARDMAN
+   resolves the actor from the cert CN (ADR 31), so every payphone shares
+   one actor; per-terminal attribution depends on the CAUT `terminal`
+   object being filled in (see `CARDMAN_2.5_ALIGNMENT.md` C10).
 
 ## Abuse cases to test
 

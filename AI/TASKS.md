@@ -89,11 +89,26 @@ Status: all cards **not started** as of 2026-10-13.
   a 0x02 auth request.
 
 ### T11. Rate-table generator (G8)
-- **Goal**: generate terminal rate tables from `GET /api/rates` (via
-  the bridge) so displayed price equals settled price.
+- **Goal**: generate terminal rate tables from CARDMAN's `GET /api/rates`
+  so the displayed price matches what CDRI charges (CDRI rates every
+  call, CARDMAN ADR 8).
 - **Files**: `generate_cardman_rates.py` (new).
-- **Depends on**: bridge rating moving past its placeholder (integration
-  repo).
+- **Needs**: a credential in the `mediation` or `admin` WAPI group (the
+  only groups allowed on `/api/rates`).
+
+### T13. Complete the CAUT/CDRI payload (G14) - do before T7
+- **Goal**: fork side of `docs/cardman-compat/CARDMAN_2.5_ALIGNMENT.md`.
+  On `/authorize` send `seq_num` (FUNF `seq`), `requested_at` (fixed per
+  `(terminal, seq)` within a session), `international` (`yes` when
+  `call_type & 0x0f == 0x06`), and the terminal phone number. On `/cdr`
+  send the terminal's `call_cost` as the reported charge, skip
+  `CALL_TYPE_UNANSWERED`, and make `cdr_id` wrap-safe by adding the
+  record's `start_ts`.
+- **Files**: `src/mm_cardman_bridge.[ch]`, `src/mm_manager.c` (two case
+  blocks), `tools/cardman_stub_bridge.py` (assert new fields).
+- **Depends on**: matching bridge change in the integration repo (owner).
+- **Done when**: stub bridge asserts the fields; against a CARDMAN dev
+  stack CAUT returns no 400 and an international dial gets an `INTL` hold.
 
 ### T12. Linux-only CARDMAN release and docs (G9, D2)
 - **Goal**: README states CARDMAN mode is Linux-only; release workflow

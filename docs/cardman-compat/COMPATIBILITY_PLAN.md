@@ -29,7 +29,8 @@ CARDMAN (BRICKS)
 Design rules:
 
 1. **Decisions about money live in CARDMAN.** mm_manager never approves
-   locally and never computes the settled charge.
+   locally, and neither mm_manager nor the bridge computes the settled
+   charge: CDRI rates every call (CARDMAN ADR 8).
 2. **Card data has exactly one clear-text path:** terminal -> mm_manager
    memory -> loopback -> bridge. Every other sink is masked or removed.
 3. **Every CDR the terminal hands over is either accepted by CARDMAN or
@@ -49,7 +50,8 @@ Design rules:
 | Bridge address guard | Reject non-loopback `CARDMAN_BRIDGE_ADDR` unless an explicit override is set; optional Unix-domain socket. Validate PAN/PIN/called number are digits before building JSON. | G3 |
 | Unknown-auth guard | Explicit `case` for 0x01/0x04/0x3d/0x46: parse by struct size where known, decline any auth request, log and ACK-hold CDR-like records. | G4 |
 | CARDMAN card-table profile | A documented `tables/cardman/` card table with CARDMAN BIN ranges, `CARD_VF_NCCVAL_IND` set (manager validation required). | G5 |
-| Rate-table generator | Script (sibling to `generate_lcd.py`) that pulls `GET /api/rates` via the bridge and emits terminal rate tables, so displayed and settled prices match. | G8 |
+| Rate-table generator | Script (sibling to `generate_lcd.py`) that pulls `GET /api/rates` (needs `mediation` or `admin` ACL) and emits terminal rate tables, so displayed prices match what CDRI will charge. | G8 |
+| CAUT/CDRI payload completion | Forward `seq_num`, stable `requested_at`, `international` (from `call_type`), terminal phone number; on CDRs forward reported `call_cost` and skip unanswered calls. | G14 |
 | Replay test harness | `.dlog` fixtures with synthetic test PANs, run in `ctest` against `tools/cardman_stub_bridge.py`. | G10 |
 
 ## 2. Decisions needed before implementation
@@ -59,11 +61,11 @@ CARDMAN review's).
 
 | ID | Question | Options | Recommendation |
 |---|---|---|---|
-| D1 | What happens to a CDR when the bridge is down? | (a) Withhold the ACK so the terminal keeps the record and re-sends next call-in. (b) ACK and keep it in a local outbox. | **(a) first, (b) as backup.** (a) keeps the terminal as the system of record and adds no local unmasked storage. It depends on the terminal re-sending un-ACKed CDRs, which must be verified on real hardware. If it does not, use (b). |
+| D1 | What happens to a CDR when the bridge or CARDMAN is unreachable? | (a) Withhold the ACK so the terminal keeps the record and re-sends next call-in. (b) ACK and keep it in a local outbox. | **(a) first, (b) as backup.** Scope is narrow: CDRI durably parks `UNMATCHED`/`NOTARIFF` itself, so any well-formed CDRI response counts as delivered; only transport errors and `INTERNAL` need this. (a) depends on the terminal re-sending un-ACKed CDRs, to verify on hardware. |
 | D2 | Platform support for the CARDMAN build | Linux only, or implement Winsock client | **Linux only** (static musl artifact). Windows keeps failing closed and the README says so. |
-| D3 | WAPI identity group | New `millennium` group or reuse `agi` | Defer to integration repo / CARDMAN review (already raised in `bridge/README.md`). No fork change either way. |
+| D3 | WAPI identity group | New group, or reuse `agi` (the only existing group with both CAUT and CDRI) | New group, but **not named `millennium`**: that is already CARDMAN's database binding name. Suggest `payphone`. CARDMAN review decides. No fork change either way. |
 | D4 | PINs longer than 4 digits | Restrict CARDMAN cards used here to 4-digit PINs, or find another wire path | Restrict, and have the bridge reject longer-PIN cards explicitly. Needs CARDMAN confirmation. |
-| D5 | Hold sizing (no mid-call cutoff, G6) | Fixed max-duration HOLD, or per-destination | CARDMAN side; document the constraint in the CARDMAN ADR. |
+| D5 | Hold sizing (no mid-call cutoff, G6) | Fixed max-duration HOLD, or per-destination | CARDMAN already sizes holds from its tariff engine, and `approved_limited` caps them; overage becomes an AUDIT `SHORTFALL`. Document in the CARDMAN ADR that this front end cannot honor a cap mid-call. |
 
 ## 3. Phased roadmap
 
@@ -87,6 +89,13 @@ integration repo's SOW phases.
   finds no full test PAN and no PIN; non-loopback bridge address is
   refused; unknown auth table yields a decline, not silence.
 
+### P1b. CAUT/CDRI payload completion (G14)
+- Fork side of [`CARDMAN_2.5_ALIGNMENT.md`](CARDMAN_2.5_ALIGNMENT.md); the
+  bridge side is owner action in the integration repo.
+- Acceptance: against a CARDMAN dev stack, approve/decline round-trip
+  succeeds (no 400 from CAUT); an international dial produces an `INTL`
+  hold; a retried auth within a session yields the same `auth_code`.
+
 ### P2. CDR durability (G1)
 - Implement D1's chosen approach. Add idempotent retry (the bridge
   already uses `cdr_id = mm-<terminal>-<seq>`).
@@ -96,8 +105,8 @@ integration repo's SOW phases.
 ### P3. Terminal configuration and pricing (G5, G8)
 - CARDMAN card-table profile and rate-table generator.
 - Acceptance: a CARDMAN test BIN always produces a 0x02 auth request on
-  hardware; rate shown on the terminal display equals the bridge's
-  `charge_cents` for the same call in a fixed test matrix.
+  hardware; rate shown on the terminal display equals CDRI's
+  `charged_cents` for the same call in a fixed test matrix.
 
 ### P4. Automated verification (G10)
 - Register replay tests in CMake (`add_test`), run in the existing
