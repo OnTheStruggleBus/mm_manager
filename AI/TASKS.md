@@ -5,7 +5,10 @@ sized for one PR. Do them in order unless the owner says otherwise.
 Cards marked **needs decision** must not start until the named decision
 is recorded.
 
-Status: all cards **not started** as of 2026-10-13.
+Status as of 2026-10-13: T13 done and live-proven against a CARDMAN
+2.5.0.1 container (hardware checks open); the T16 reference bridge done
+in `tools/` and live-proven (port needs owner approval); T5 done; all
+other cards not started.
 
 ---
 
@@ -41,7 +44,17 @@ Status: all cards **not started** as of 2026-10-13.
   PIN in any output, checked by decoding each artifact in ASCII and
   packed-BCD form (automated in T9).
 
-### T5. Bridge address guard and input validation (G3, G15)
+### T5. Bridge address guard and input validation (G3, G15) - **done**
+- **Done (PR #8)**: `src/mm_cardman_bridge.c` refuses any
+  `CARDMAN_BRIDGE_ADDR` that does not resolve only to loopback, before
+  connecting, with **no override**: SECURITY_RULES rule 5 allows card
+  data only to a local bridge, so an override would be a way around it.
+  Fields are allow-listed before JSON is built; `auth_code` must be
+  exactly 8 chars of `[0-9A-Z]` (base-36, T13; the "hex" below predates
+  it). Responses must be a complete HTTP 200 whose body is exactly
+  `Content-Length` bytes of one flat JSON object; a timeout is a failure,
+  not EOF. Tests: `mm_cardman_test`, `tools/test_cardman_bridge.py`
+  `ForkRejectsBrokenBridge`.
 - **Goal**: refuse non-loopback `CARDMAN_BRIDGE_ADDR` unless an explicit
   override env var is set; validate digit-only PAN/PIN/called number
   before building JSON; require `auth_code` to be exactly 8 hex chars
@@ -97,20 +110,32 @@ Status: all cards **not started** as of 2026-10-13.
 ### T11. Rate-table generator (G8) - superseded by T14
 - Folded into T14, which covers the full sync pipeline.
 
-### T13. Complete the CAUT/CDRI payload (G14) - do before T7
-- **Goal**: fork side of `docs/cardman-compat/CARDMAN_2.5_ALIGNMENT.md`.
-  On `/authorize` send `seq_num` (FUNF `seq`), `requested_at` (fixed per
-  `(terminal, seq)` within a session), `international` (`yes` when
-  `call_type & 0x0f == 0x06`), and the terminal phone number. On `/cdr`
-  send the terminal's `call_cost` as the reported charge, skip
-  `CALL_TYPE_UNANSWERED`, and make `cdr_id` wrap-safe by adding the
-  record's `start_ts`.
-- **Files**: `src/mm_cardman_bridge.[ch]`, `src/mm_manager.c` (two case
-  blocks), `tools/cardman_stub_bridge.py` (assert new fields).
-- **Depends on**: matching bridge change, T16 (integration repo, owner).
-- **Plan**: phase P1b items 1 to 3.
-- **Done when**: stub bridge asserts the fields; against a CARDMAN dev
-  stack CAUT returns no 400 and an international dial gets an `INTL` hold.
+### T13. Complete the CAUT/CDRI payload (G14) - **done, live-proven; hardware checks open**
+- **Done**: `src/mm_cardman.[ch]` (new glue), `src/mm_cardman_bridge.[ch]`,
+  call sites in `src/mm_manager.c`. `/authorize` sends `seq_num`, a
+  `requested_at` stable per `(terminal, seq)` for 600 s, `call_type`,
+  `international`, the line number. `/cdr` sends every CDR carrying a
+  CARDMAN `auth_code` (answered or not), `call_cost`, `call_type`,
+  `rate_type`, terminal id and line number, with `cdr_id`
+  `mm-<terminal>-<seq>-<start_ts>` (UTC). `auth_code` is base-36, not hex.
+- **Tests**: `mm_cardman_test` (ctest), `mm_cardman_drive` +
+  `tools/test_cardman_bridge.py` (mock CARDMAN).
+- **Live run (2026-10-13)**: `tools/cardman_live_test.sh` passes (27
+  checks, 5 consecutive runs) against a CARDMAN 2.5.0.1 dev container
+  (MCardSys `v2.5.0.1`, `90bcb47`, BRICKS 3.4.1), with the fork glue
+  driven by `mm_cardman_drive` and `tools/cardman_bridge.py`: answered
+  call `CAPTURED`; unanswered `RELEASED`; retries keep the `auth_code`
+  and place no hold, resent CDRs `DUPLICATE`; 7-digit dial rated as
+  NPA 212; international dial gets an `INTL` hold; `approved_limited`
+  and a wrong PIN are invalid; journal actors `platform:mm-dev` /
+  `mediation:mm-dev`; `cdr` row `source`/`switch_id`/`ani`/
+  `reported_charge_cents`; terminal-local start time (off UTC) arrives as
+  UTC `start_ts`; TAUTH/TCDR hold only the masked PAN, no PIN.
+- **Remaining (hardware)**: confirm the terminal echoes the full 64-bit
+  `auth_code` in the CDR and emits a CDR for an approved call that never
+  connects. Not covered by the live run: the real `mm_manager` DLOG loop
+  (the driver calls the same glue and accounting functions, after
+  framing).
 
 ### T14. Load terminal rate tables from CARDMAN (objective O1)
 - **Goal**: scheduled sync from `GET /api/rates` to per-terminal rate,
@@ -138,20 +163,43 @@ Status: all cards **not started** as of 2026-10-13.
 - **Done when**: contract tests fail on any field rename/removal on
   either hop; every CAUT disposition and CDRI state has a test.
 
-### T16. Bridge changes for CARDMAN 2.5 (plan P1b items 1 to 4) - **owner approval required**
-- **Repo**: `OnTheStruggleBus/-mm-cardman-integration`, not this one. Do
-  not start without the owner's go-ahead and repo access.
-- **Goal**: in `bridge/cardman_bridge.py`, send `seq_num`,
-  `requested_at`, `international`, and the full `terminal` object to
-  CAUT; remove `RateCache` and send the reported `charge_cents` to CDRI;
-  treat CDRI `INTERNAL` and transport errors as retryable and every other
-  state as delivered; use the WAPI group from pre-work item 1 (not
-  `millennium`).
-- **Depends on**: T13 (fork sends the new fields); pre-work item 1
-  (`docs/cardman-compat/PREWORK.md`) for the group.
-- **Done when**: the bridge's mock CARDMAN enforces CAUT's required
-  fields and the bridge passes; a run against a CARDMAN dev stack meets
-  P1b acceptance.
+### T16. Bridge for CARDMAN 2.5.0.1 - **reference live-proven here; port needs owner approval**
+- **Reference**: `tools/cardman_bridge.py`, tested by
+  `tools/test_cardman_bridge.py`; contract in
+  `docs/cardman-compat/BRIDGE_CONTRACT.md` section 3. Live-proven against
+  CARDMAN 2.5.0.1 on 2026-10-13 (`tools/cardman_live_test.sh`, see T13);
+  no bridge change was needed. The mock's CAUT/CDRI shapes match the live
+  ones for approve, `declined` (wrong PIN), `bad_card`, missing
+  `requested_at` (400), `UNMATCHED`, and missing `charge_cents` (400).
+- **Port tasks for `OnTheStruggleBus/-mm-cardman-integration`
+  `bridge/cardman_bridge.py`** (do not start without the owner's go-ahead):
+  1. Identity: group `payphone`, cert CN = Basic-Auth userid = `mm-<env>`;
+     password from env only. Remove the `millennium` group suggestion.
+  2. CAUT body: `variant:"funf"`, `seq_num`, `requested_at` (keep it per
+     `(terminal, seq, card)` for 600 s), `international` `"yes"`/`"no"`
+     from the fork (never `"unknown"`), full `terminal` object.
+  3. Dispositions: only `approved` is valid; `approved_limited` is
+     invalid **and** triggers a zero-second release CDR; non-200,
+     timeout, unparseable -> invalid.
+  4. Normalize numbers: 7 digits -> terminal NPA + 7; 0/1+7 -> NPA+7;
+     0+10 -> 10.
+  5. CDRI body: `cdr_id` from the fork unchanged, `auth_code`, `pan`,
+     `charge_cents` = terminal cost or 0, `start_ts`, `duration_secs` 0
+     for unanswered/abandoned/denied, `called_number`, `ani` = line,
+     `dnis`, `switch_id` = terminal, `source:"mm_manager"`.
+  6. Delete `RateCache` and every `GET /api/rates` call (403 for
+     `payphone`).
+  7. Answer mm_manager `{"delivered":bool}` on `/cdr`: true for any CDRI
+     state (`DUPLICATE`, `NOTARIFF` included), false for transport
+     errors, `INTERNAL`, and 400.
+  8. Retry once with the identical body after a transport error, within
+     a 9 s budget; release the hold if the approval cannot be written
+     back to mm_manager.
+  9. Listen on loopback only; never log PAN or PIN.
+  10. Update `bridge/tests/mock_cardman.py` to enforce `seq_num`/
+      `requested_at` and the base-36 `auth_code`.
+- **Done when**: `tools/cardman_live_test.sh` passes against the ported
+  bridge.
 
 ### T12. Linux-only CARDMAN release and docs (G9, D2)
 - **Goal**: README states CARDMAN mode is Linux-only; release workflow

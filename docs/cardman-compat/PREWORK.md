@@ -9,18 +9,20 @@ item name it.
 Findings were read from MCardSys `main` at `4e9a6eb`; the CARDMAN
 session verifies each before acting.
 
-| # | Item | Needed by |
-|---|---|---|
-| 1 | WAPI group for the payphone front end, granted CAUT + CDRI only. Not named `millennium` (CARDMAN's DB binding). Wired through ACL, rate-limit and telco-scope gates. | Plan D3, P1b row 4, T16 |
-| 2 | Rate data that matches billing: full-tariff export route, quote route, or an accepted tolerance for base rows only. New route if it would change `/api/rates` (2.5 keeps existing routes byte-identical). | O1, T14 |
-| 3 | `ratesrv.rexx` returns `ok:true` with a partial list on a FETCH error. Fail closed. | O1, T14 |
-| 4 | Document `GET /api/rates` in `docs/api/API_CONTRACTS.md`. | O1, O2 |
-| 5 | Confirm front-end contract notes: CAUT `seq_num`/`requested_at`, `international`, no mid-call cutoff vs `approved_limited`, `charge_cents` handling, CDRI `source`, wrap-safe `cdr_id`. | P1b, P2, T13 |
-| 6 | Fix stale PINVERIFY comment in `auth.rexx`. | None (hygiene) |
-| 7 | CARDMAN ADR (parallel to ADR 11) and `docs/frontends/MILLENNIUM_GATEWAY_CONTRACT.md`. | P5 graduation |
+| # | Item | Needed by | Status (CARDMAN 2.5.0.1, `v2.5.0.1` / `90bcb47`) |
+|---|---|---|---|
+| 1 | WAPI group for the payphone front end, granted CAUT + CDRI only. Not named `millennium`. Wired through ACL, rate-limit and telco-scope gates. | Plan D3, P1b row 4, T16 | **Done.** Group `payphone`, CN = userid = `mm-<env>`, dev `mm-dev`; both coverage gates check it. [ADR 40](https://github.com/OnTheStruggleBus/MCardSys/blob/main/docs/ai/ARCHITECTURE_DECISIONS.md#adr-40-millennium-payphone-gateway), [contract §2-3](https://github.com/OnTheStruggleBus/MCardSys/blob/main/docs/frontends/MILLENNIUM_GATEWAY_CONTRACT.md). |
+| 2 | Rate data that matches billing. | O1, T14 | **Decided:** option (c), base rows with a documented tolerance, for 2.5.0.1; quote route `POST /api/rates/quote` proposed for 2.6. `payphone` cannot read `/api/rates`. [Contract §6](https://github.com/OnTheStruggleBus/MCardSys/blob/main/docs/frontends/MILLENNIUM_GATEWAY_CONTRACT.md). |
+| 3 | `ratesrv.rexx` partial list as success. | O1, T14 | **Done.** A mid-list fetch error now returns `INTERNAL`. [`API_CONTRACTS.md` `GET /api/rates`](https://github.com/OnTheStruggleBus/MCardSys/blob/main/docs/api/API_CONTRACTS.md). |
+| 4 | Document `GET /api/rates`. | O1, O2 | **Done.** Including minute-precision `effective_ts` and whole-list change detection. [`API_CONTRACTS.md`](https://github.com/OnTheStruggleBus/MCardSys/blob/main/docs/api/API_CONTRACTS.md). |
+| 5 | Confirm front-end contract notes. | P1b, P2, T13 | **Done, with corrections:** `seq_num`/`requested_at` required; `international:"yes"` only; `approved_limited` -> invalid + release CDR; `charge_cents` required, not billed; `source: mm_manager` accepted; `cdr_id` `mm-<terminal>-<seq>-<start_ts>` accepted; **send a CDR for unanswered calls too**. [Contract §4-5](https://github.com/OnTheStruggleBus/MCardSys/blob/main/docs/frontends/MILLENNIUM_GATEWAY_CONTRACT.md). |
+| 6 | Fix stale PINVERIFY comment in `auth.rexx`. | None | **Done.** `auth.rexx` header (L12-16) now says the PIN is verified in Postgres with `crypt()`. |
+| 7 | CARDMAN ADR and `MILLENNIUM_GATEWAY_CONTRACT.md`. | P5 graduation | **Done.** [ADR 40](https://github.com/OnTheStruggleBus/MCardSys/blob/main/docs/ai/ARCHITECTURE_DECISIONS.md#adr-40-millennium-payphone-gateway), [contract](https://github.com/OnTheStruggleBus/MCardSys/blob/main/docs/frontends/MILLENNIUM_GATEWAY_CONTRACT.md). |
 
-**Status:** not started (2026-10-13). Update this table with the
-CARDMAN PR links as items land.
+**Status:** CARDMAN-side pre-work landed in 2.5.0.1 (2026-10-13). New
+asks found while implementing the fork and bridge are in
+[`CARDMAN_REQUESTS.md`](CARDMAN_REQUESTS.md). The prompt below is kept
+for history.
 
 ## Prompt for the CARDMAN session
 

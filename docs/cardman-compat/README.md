@@ -1,8 +1,8 @@
 # CARDMAN compatibility plan
 
 Planning documents for turning this fork's CARDMAN prototype into a
-version that can safely front real CARDMAN card traffic. **Docs only.**
-No code in this directory, and nothing here changes runtime behavior.
+version that can safely front real CARDMAN card traffic. Docs only; the
+code they describe is in `src/mm_cardman*.c` and `tools/cardman_*.py`.
 
 | File | What it covers |
 |---|---|
@@ -10,7 +10,9 @@ No code in this directory, and nothing here changes runtime behavior.
 | [`COMPATIBILITY_PLAN.md`](COMPATIBILITY_PLAN.md) | Target architecture, phased roadmap, acceptance criteria, risks, and decisions needed from the owner. |
 | [`THREAT_MODEL.md`](THREAT_MODEL.md) | Every place card data (PAN/PIN) flows or lands, and the control each one needs. |
 | [`PREWORK.md`](PREWORK.md) | CARDMAN-side pre-work (done in MCardSys before live testing), with a ready-to-use prompt for a CARDMAN session. |
-| [`CARDMAN_2.5_ALIGNMENT.md`](CARDMAN_2.5_ALIGNMENT.md) | Contract check against CARDMAN (MCardSys) 2.5: what changed, what the bridge and fork must send. |
+| [`CARDMAN_2.5_ALIGNMENT.md`](CARDMAN_2.5_ALIGNMENT.md) | Contract check against CARDMAN (MCardSys) 2.5 / 2.5.0.1: what changed, what the bridge and fork must send. |
+| [`BRIDGE_CONTRACT.md`](BRIDGE_CONTRACT.md) | The mm_manager <-> bridge <-> CARDMAN hop contract, and the code audit it came from. |
+| [`CARDMAN_REQUESTS.md`](CARDMAN_REQUESTS.md) | Open requests for the CARDMAN owner. |
 
 Agent-facing task cards derived from this plan live in
 [`../../AI/TASKS.md`](../../AI/TASKS.md).
@@ -37,6 +39,10 @@ CARDMAN-compatible.
 
 - Fork code reviewed at commit `3e173a3`.
 - Integration repo docs read at commit `687898c` (read-only).
-- CARDMAN (`MCardSys`) 2.5 checked at commit `4e9a6eb` (read-only).
-- Nothing in this plan has been validated against a live CARDMAN
-  instance or physical terminal; items that depend on that are marked.
+- CARDMAN (`MCardSys`) 2.5 checked at commit `4e9a6eb`; 2.5.0.1
+  (`90bcb47`, tag `v2.5.0.1`) re-checked the same day (read-only).
+- Validated against a live CARDMAN 2.5.0.1 dev container on 2026-10-13:
+  `tools/cardman_live_test.sh` passes (P1b; see `COMPATIBILITY_PLAN.md`
+  and `AI/TASKS.md` T13). Nothing has been validated on a physical
+  terminal yet; the open hardware checks are in `BRIDGE_CONTRACT.md`
+  section 4.

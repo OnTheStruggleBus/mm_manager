@@ -123,6 +123,8 @@ set(MANAGER_SRC
     "src/mm_manager.c"
     "src/mm_manager.h"
     "src/mm_accounting.c"
+    "src/mm_cardman.c"
+    "src/mm_cardman.h"
     "src/mm_cardman_bridge.c"
     "src/mm_cardman_bridge.h"
     "src/mm_connection.c"
@@ -153,6 +155,26 @@ TARGET_LINK_LIBRARIES(mm_manager mm_serial mm_util sqlite3 wsock32 ws2_32)
 else()
 TARGET_LINK_LIBRARIES(mm_manager mm_serial mm_util sqlite3 pthread dl)
 endif()
+# CARDMAN glue tests: offline unit tests (ctest) and a driver that sends
+# synthetic wire records through the real glue to a running bridge.
+set(CARDMAN_GLUE_SRC "src/mm_cardman.c" "src/mm_cardman.h" "src/mm_cardman_bridge.c" "src/mm_cardman_bridge.h")
+add_executable (mm_cardman_test "tests/mm_cardman_test.c" ${CARDMAN_GLUE_SRC})
+TARGET_LINK_LIBRARIES(mm_cardman_test mm_util)
+# The driver also persists through the production accounting code
+# (MM_CARDMAN_DRIVE_DB), so it links the database sources too.
+add_executable (mm_cardman_drive "tests/mm_cardman_drive.c" ${CARDMAN_GLUE_SRC}
+    "src/mm_accounting.c" "src/mm_sqlite3.c" "src/mm_tables.c" "src/mm_config.c")
+TARGET_LINK_LIBRARIES(mm_cardman_drive mm_util sqlite3)
+if(NOT MSVC)
+TARGET_LINK_LIBRARIES(mm_cardman_drive pthread dl)
+endif()
+if(MSVC)
+TARGET_LINK_LIBRARIES(mm_cardman_test wsock32 ws2_32)
+TARGET_LINK_LIBRARIES(mm_cardman_drive wsock32 ws2_32)
+endif()
+enable_testing()
+add_test(NAME mm_cardman_test COMMAND mm_cardman_test)
+
 add_executable (mm_admess "src/mm_admess.c" "src/mm_manager.h")
 TARGET_LINK_LIBRARIES(mm_admess mm_util)
 add_executable (mm_areacode "src/mm_areacode.c" "src/mm_manager.h")
