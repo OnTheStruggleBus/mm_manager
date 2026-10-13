@@ -315,7 +315,11 @@ int cardman_bridge_authorize(const cardman_auth_request_t *req, cardman_auth_res
         return -1;
     }
 
-    snprintf(result->auth_code, sizeof(result->auth_code), "%s", auth_code);
+    /* Length checked above; an explicit copy because GCC's
+     * -Wformat-truncation can't see that check through snprintf.
+     */
+    memcpy(result->auth_code, auth_code, 8);
+    result->auth_code[8] = '\0';
     result->approved = 1;
     return 0;
 }
