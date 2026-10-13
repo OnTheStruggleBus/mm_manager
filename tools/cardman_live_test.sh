@@ -19,8 +19,12 @@
 #     bash -c 'cmake -B build && cmake --build build && tools/cardman_live_test.sh'
 #
 # Env: CONTAINER (default: the running cardman-test:local container),
-#      CARDMAN_URL (default https://127.0.0.1:8443), PP_USER / PP_PASS
-#      (default the dev identity mm-dev / mm-dev_dev), TERMINAL.
+#      CARDMAN_URL (default https://127.0.0.1:8443), PP_USER (default the
+#      dev identity mm-dev), TERMINAL.
+# Required: PP_PASS (the payphone identity's password) and ISSUER_PASS
+#      (the issuer's, to mint a test card). Never stored in this repo
+#      (AI/SECURITY_RULES.md rule 8); for a dev container they are the
+#      defaults in MCardSys scripts/verify-payphone.sh.
 #
 # Uses a freshly issued test card. The card number and PIN are never
 # printed; only masked forms appear in output. The whole run's output,
@@ -32,7 +36,8 @@ cd "$(dirname "$0")/.."
 CONTAINER="${CONTAINER:-$(docker ps -q --filter ancestor=cardman-test:local | head -1)}"
 CARDMAN_URL="${CARDMAN_URL:-https://127.0.0.1:8443}"
 PP_USER="${PP_USER:-mm-dev}"
-PP_PASS="${PP_PASS:-mm-dev_dev}"
+PP_PASS="${PP_PASS:-}"
+ISSUER_PASS="${ISSUER_PASS:-}"
 TERMINAL="${TERMINAL:-2125551000}"
 DRIVE=./build/mm_cardman_drive
 WORK=$(mktemp -d)
@@ -50,6 +55,7 @@ exec 3>&1 4>&2 >"$WORK/out" 2>&1
 
 pass() { echo "   OK: $1"; }
 fail() { echo "   FAIL: $1"; FAILED=1; }
+[ -n "$PP_PASS" ] && [ -n "$ISSUER_PASS" ] || { echo "FAIL: set PP_PASS and ISSUER_PASS (see the header)"; exit 1; }
 [ -n "$CONTAINER" ] || { echo "FAIL: no running cardman-test:local container"; exit 1; }
 [ -x "$DRIVE" ] || { echo "FAIL: build $DRIVE first"; exit 1; }
 
@@ -63,7 +69,7 @@ echo "== setup: payphone cert, a fresh test card, the bridge =="
 for f in ca.pem client-payphone.pem client-payphone-key.pem; do
   docker cp -q "$CONTAINER:/app/bricks/conf/$f" "$WORK/$f" || { echo "FAIL: docker cp $f"; exit 1; }
 done
-NEWC=$(docker exec "$CONTAINER" bash -c 'cd /app && curl -sS -m 15 --cert bricks/conf/client-issuer.pem --key bricks/conf/client-issuer-key.pem --cacert bricks/conf/ca.pem -u "issuer:${ISSUER_PASS:-issuer_dev}" -H "Content-Type: application/json" -X POST https://127.0.0.1:8443/api/newcust -d "{\"initial_balance_cents\":2000,\"telco_id\":\"TELCO01\"}"')
+NEWC=$(ISSUER_PASS="$ISSUER_PASS" docker exec -e ISSUER_PASS "$CONTAINER" bash -c 'cd /app && curl -sS -m 15 --cert bricks/conf/client-issuer.pem --key bricks/conf/client-issuer-key.pem --cacert bricks/conf/ca.pem -u "issuer:$ISSUER_PASS" -H "Content-Type: application/json" -X POST https://127.0.0.1:8443/api/newcust -d "{\"initial_balance_cents\":2000,\"telco_id\":\"TELCO01\"}"')
 PAN=$(sed -nE 's/.*"pan"[[:space:]]*:[[:space:]]*"([0-9]{16})".*/\1/p' <<<"$NEWC")
 PIN=$(sed -nE 's/.*"pin"[[:space:]]*:[[:space:]]*"([0-9]{4})".*/\1/p' <<<"$NEWC")
 [ -n "$PAN" ] && [ -n "$PIN" ] || { echo "FAIL: NEWC did not issue a card (run ./scripts/seed.sh in the container)"; exit 1; }
