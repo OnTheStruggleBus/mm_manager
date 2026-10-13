@@ -9,6 +9,19 @@
 
 #include "src/mm_cardman.h"
 
+static void set_tz(const char *tz) {
+#ifdef _WIN32
+    char env[64];
+
+    snprintf(env, sizeof(env), "TZ=%s", tz);
+    _putenv(env);
+    _tzset();
+#else
+    setenv("TZ", tz, 1);
+    tzset();
+#endif
+}
+
 static int failures;
 
 #define CHECK(cond) do { \
@@ -75,6 +88,18 @@ static void test_terminal_ts(void) {
     CHECK(cardman_terminal_ts_to_utc(ts, out, sizeof(out)) == 0);
     CHECK(strcmp(out, "2026-10-13T18:42:55Z") == 0);
     CHECK(cardman_terminal_ts_to_utc(bad, out, sizeof(out)) == -1);
+
+    /* Off UTC the conversion must actually shift: 18:42:55 EDT is 22:42:55Z.
+     * POSIX TZ strings need no tzdata; MSVC takes the short form.
+     */
+#ifdef _WIN32
+    set_tz("EST5EDT");
+#else
+    set_tz("EST5EDT,M3.2.0,M11.1.0");
+#endif
+    CHECK(cardman_terminal_ts_to_utc(ts, out, sizeof(out)) == 0);
+    CHECK(strcmp(out, "2026-10-13T22:42:55Z") == 0);
+    set_tz("UTC");
 }
 
 static void test_international(void) {
@@ -99,13 +124,7 @@ static void test_cdr_without_auth_code_is_not_forwarded(void) {
 
 int main(void) {
     /* Pin the zone so the local -> UTC conversion is deterministic. */
-#ifdef _WIN32
-    _putenv("TZ=UTC");
-    _tzset();
-#else
-    setenv("TZ", "UTC", 1);
-    tzset();
-#endif
+    set_tz("UTC");
 
     test_auth_code_codec();
     test_requested_at();
