@@ -5,8 +5,10 @@ sized for one PR. Do them in order unless the owner says otherwise.
 Cards marked **needs decision** must not start until the named decision
 is recorded.
 
-Status as of 2026-10-13: T13 done (offline-tested; live run pending) and
-the T16 reference bridge done in `tools/`; all other cards not started.
+Status as of 2026-10-13: T13 done and live-proven against a CARDMAN
+2.5.0.1 container (hardware checks open); the T16 reference bridge done
+in `tools/` and live-proven (port needs owner approval); T5 done; all
+other cards not started.
 
 ---
 
@@ -42,7 +44,17 @@ the T16 reference bridge done in `tools/`; all other cards not started.
   PIN in any output, checked by decoding each artifact in ASCII and
   packed-BCD form (automated in T9).
 
-### T5. Bridge address guard and input validation (G3, G15)
+### T5. Bridge address guard and input validation (G3, G15) - **done**
+- **Done (PR #8)**: `src/mm_cardman_bridge.c` refuses any
+  `CARDMAN_BRIDGE_ADDR` that does not resolve only to loopback, before
+  connecting, with **no override**: SECURITY_RULES rule 5 allows card
+  data only to a local bridge, so an override would be a way around it.
+  Fields are allow-listed before JSON is built; `auth_code` must be
+  exactly 8 chars of `[0-9A-Z]` (base-36, T13; the "hex" below predates
+  it). Responses must be a complete HTTP 200 whose body is exactly
+  `Content-Length` bytes of one flat JSON object; a timeout is a failure,
+  not EOF. Tests: `mm_cardman_test`, `tools/test_cardman_bridge.py`
+  `ForkRejectsBrokenBridge`.
 - **Goal**: refuse non-loopback `CARDMAN_BRIDGE_ADDR` unless an explicit
   override env var is set; validate digit-only PAN/PIN/called number
   before building JSON; require `auth_code` to be exactly 8 hex chars

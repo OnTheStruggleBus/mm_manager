@@ -39,6 +39,14 @@ Fork at `7cffead`; integration bridge at `687898c`
 Loopback HTTP/1.1, JSON, one request per connection. Anything but HTTP
 200 with the documented body is a failure. mm_manager waits 10 s.
 
+mm_manager refuses a bridge address that does not resolve only to
+loopback, before connecting (no override). A response counts only if it
+is complete: status 200, a body of exactly `Content-Length` bytes, and
+that body one flat JSON object (unescaped string, integer, `true`,
+`false` or `null` values, unique keys, nothing after it). A timeout or a
+short read is a failure, never a shorter response. The reference bridge
+accepts `http://` to CARDMAN only for a loopback test mock.
+
 ### `POST /authorize`
 
 ```json

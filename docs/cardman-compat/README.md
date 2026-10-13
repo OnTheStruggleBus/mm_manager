@@ -41,5 +41,8 @@ CARDMAN-compatible.
 - Integration repo docs read at commit `687898c` (read-only).
 - CARDMAN (`MCardSys`) 2.5 checked at commit `4e9a6eb`; 2.5.0.1
   (`90bcb47`, tag `v2.5.0.1`) re-checked the same day (read-only).
-- Nothing in this plan has been validated against a live CARDMAN
-  instance or physical terminal; items that depend on that are marked.
+- Validated against a live CARDMAN 2.5.0.1 dev container on 2026-10-13:
+  `tools/cardman_live_test.sh` passes (P1b; see `COMPATIBILITY_PLAN.md`
+  and `AI/TASKS.md` T13). Nothing has been validated on a physical
+  terminal yet; the open hardware checks are in `BRIDGE_CONTRACT.md`
+  section 4.
