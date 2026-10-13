@@ -107,7 +107,8 @@ Status: all cards **not started** as of 2026-10-13.
   record's `start_ts`.
 - **Files**: `src/mm_cardman_bridge.[ch]`, `src/mm_manager.c` (two case
   blocks), `tools/cardman_stub_bridge.py` (assert new fields).
-- **Depends on**: matching bridge change in the integration repo (owner).
+- **Depends on**: matching bridge change, T16 (integration repo, owner).
+- **Plan**: phase P1b items 1 to 3.
 - **Done when**: stub bridge asserts the fields; against a CARDMAN dev
   stack CAUT returns no 400 and an international dial gets an `INTL` hold.
 
@@ -136,6 +137,20 @@ Status: all cards **not started** as of 2026-10-13.
 - **Depends on**: T5, T13.
 - **Done when**: contract tests fail on any field rename/removal on
   either hop; every CAUT disposition and CDRI state has a test.
+
+### T16. Bridge changes for CARDMAN 2.5 (plan P1b items 1 to 4) - **owner approval required**
+- **Repo**: `OnTheStruggleBus/-mm-cardman-integration`, not this one. Do
+  not start without the owner's go-ahead and repo access.
+- **Goal**: in `bridge/cardman_bridge.py`, send `seq_num`,
+  `requested_at`, `international`, and the full `terminal` object to
+  CAUT; remove `RateCache` and send the reported `charge_cents` to CDRI;
+  treat CDRI `INTERNAL` and transport errors as retryable and every other
+  state as delivered; use the WAPI group agreed in D3 (not
+  `millennium`).
+- **Depends on**: T13 (fork sends the new fields); D3 for the group.
+- **Done when**: the bridge's mock CARDMAN enforces CAUT's required
+  fields and the bridge passes; a run against a CARDMAN dev stack meets
+  P1b acceptance.
 
 ### T12. Linux-only CARDMAN release and docs (G9, D2)
 - **Goal**: README states CARDMAN mode is Linux-only; release workflow

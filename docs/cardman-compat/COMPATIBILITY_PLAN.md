@@ -159,12 +159,27 @@ integration repo's SOW phases.
   form; neither is found. A plain text grep is not sufficient; non-loopback bridge address is
   refused; unknown auth table yields a decline, not silence.
 
-### P1b. CAUT/CDRI payload completion (G14)
-- Fork side of [`CARDMAN_2.5_ALIGNMENT.md`](CARDMAN_2.5_ALIGNMENT.md); the
-  bridge side is owner action in the integration repo.
+### P1b. CARDMAN 2.5 required fixes (G14, alignment C1 to C4)
+
+Four fixes from [`CARDMAN_2.5_ALIGNMENT.md`](CARDMAN_2.5_ALIGNMENT.md).
+Item 1 blocks every real authorization, so this phase must land before
+any live CARDMAN test (P5).
+
+| # | Fix | Where | Task |
+|---|---|---|---|
+| 1 | Send `seq_num` and `requested_at` to CAUT. Keep `requested_at` identical for retries of the same `(terminal, seq)`, because CAUT derives `auth_code` from `(pan, seq_num, requested_at)`. | Fork: pass FUNF `seq` and a per-session `requested_at` on `/authorize`. Bridge: forward both to CAUT. | T13 (fork), T16 (bridge) |
+| 2 | Stop rating in the bridge. CDRI rates every call (ADR 8). Send the terminal's `call_cost` as the reported `charge_cents`. | Fork: forward `call_cost` on `/cdr`. Bridge: remove `RateCache`, pass the reported value. | T13, T16 |
+| 3 | Send `international` correctly, so international calls get an `INTL` hold. Also fill CAUT's `terminal` object (`telco_id`, `terminal_id`, `phone_number`, `terminal_serial`). | Fork: derive `yes` when `call_type & 0x0f == 0x06`; send the terminal phone number. Bridge: forward the flag and build the full `terminal` object. | T13, T16 |
+| 4 | WAPI group for this front end. Do not name it `millennium` (already CARDMAN's DB binding). | CARDMAN config (`users.conf`, `web_routes.conf`, `transactions.conf`) via CARDMAN review; bridge cert CN follows the chosen name. Interim: `agi`. | D3, T16 |
+
 - Acceptance: against a CARDMAN dev stack, approve/decline round-trip
-  succeeds (no 400 from CAUT); an international dial produces an `INTL`
-  hold; a retried auth within a session yields the same `auth_code`.
+  succeeds with no 400 from CAUT; an international dial produces an
+  `INTL` hold; a retried auth within a session yields the same
+  `auth_code`; a CDR's billed amount comes from CDRI, not the bridge;
+  the bridge authenticates under the agreed group.
+- The bridge and CARDMAN items are outside this repo. They are listed
+  here so the plan is complete; the owner approves and schedules them
+  in their own repos.
 
 ### P2. CDR durability (G1)
 - Implement D1's chosen approach (withhold ACK on transport/`INTERNAL`

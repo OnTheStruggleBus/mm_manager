@@ -34,6 +34,9 @@ bridge and our earlier docs did not match.
 
 ## Required changes (summary)
 
+Tracked in the plan as phase **P1b** (`COMPATIBILITY_PLAN.md`) and
+tasks T13 (fork) and T16 (bridge).
+
 In **this fork** (new task T13):
 - Forward `seq` (as `seq_num`), a stable `requested_at`, `international`
   derived from `call_type`, and the terminal's phone number to the bridge on `/authorize`.
