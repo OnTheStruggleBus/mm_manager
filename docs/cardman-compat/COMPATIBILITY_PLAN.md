@@ -6,6 +6,13 @@ small, rebasable delta on upstream `hharte/mm_manager`.
 
 Gap IDs (G1 to G13) refer to [`ARCHITECTURE_ANALYSIS.md`](ARCHITECTURE_ANALYSIS.md).
 
+## 0. Pre-work (CARDMAN side)
+
+CARDMAN changes this front end depends on (WAPI group, rate data,
+`/api/rates` fixes and docs, contract confirmations, ADR) are tracked
+separately in [`PREWORK.md`](PREWORK.md) and done in MCardSys, outside
+this roadmap. Phases below name the pre-work item they wait on.
+
 ## 1. Target architecture
 
 ```
@@ -83,8 +90,8 @@ single source, and the prices a caller sees are generated from it.
   per-number overrides, time-of-day periods, distance bands, connection
   fees, minimum charges and surcharges (`cdrin.rexx` `RATE_COMPUTE`).
   Terminal display can approximate, not equal, the settled charge until
-  CARDMAN exposes those inputs or a quote endpoint. Raise with CARDMAN
-  review; record the tolerance accepted.
+  CARDMAN exposes those inputs or a quote endpoint. Resolved in
+  pre-work item 2.
 - **Acceptance**: changing a rate in CARDMAN (`RADM`) reaches a test
   terminal's display on its next call-in; a fixed call matrix shows
   terminal price within the accepted tolerance of CDRI `charged_cents`.
@@ -131,7 +138,7 @@ CARDMAN review's call).
 |---|---|---|---|
 | D1 | What happens to a CDR when the bridge or CARDMAN is unreachable? | (a) Withhold the ACK so the terminal keeps the record and re-sends next call-in. (b) ACK and keep it in a local outbox. | **(a).** (b) stores an unmasked PAN and conflicts with `SECURITY_RULES.md` rule 2; choosing it requires amending that rule first. If (a) fails on hardware, this decision goes back to the owner. Scope is narrow: CDRI durably parks `UNMATCHED`/`NOTARIFF` itself, so any well-formed CDRI response counts as delivered; only transport errors and `INTERNAL` need this. (a) depends on the terminal re-sending un-ACKed CDRs, to verify on hardware. |
 | D2 | Platform support for the CARDMAN build | Linux only, or implement Winsock client | **Linux only** (static musl artifact). Windows keeps failing closed and the README says so. |
-| D3 | WAPI identity group | New group, or reuse `agi` (the only existing group with both CAUT and CDRI) | New group, but **not named `millennium`**: that is already CARDMAN's database binding name. Suggest `payphone`. CARDMAN review decides. No fork change either way. |
+| D3 | WAPI identity group | Moved to pre-work item 1 (`PREWORK.md`). | Decided in CARDMAN. |
 | D4 | PINs longer than 4 digits | Restrict CARDMAN cards used here to 4-digit PINs, or find another wire path | Restrict, and have the bridge reject longer-PIN cards explicitly. Needs CARDMAN confirmation. |
 | D5 | Hold sizing (no mid-call cutoff, G6) | Fixed max-duration HOLD, or per-destination | CARDMAN already sizes holds from its tariff engine, and `approved_limited` caps them; overage becomes an AUDIT `SHORTFALL`. Document in the CARDMAN ADR that this front end cannot honor a cap mid-call. |
 
@@ -170,16 +177,15 @@ any live CARDMAN test (P5).
 | 1 | Send `seq_num` and `requested_at` to CAUT. Keep `requested_at` identical for retries of the same `(terminal, seq)`, because CAUT derives `auth_code` from `(pan, seq_num, requested_at)`. | Fork: pass FUNF `seq` and a per-session `requested_at` on `/authorize`. Bridge: forward both to CAUT. | T13 (fork), T16 (bridge) |
 | 2 | Stop rating in the bridge. CDRI rates every call (ADR 8). Send the terminal's `call_cost` as the reported `charge_cents`. | Fork: forward `call_cost` on `/cdr`. Bridge: remove `RateCache`, pass the reported value. | T13, T16 |
 | 3 | Send `international` correctly, so international calls get an `INTL` hold. Also fill CAUT's `terminal` object (`telco_id`, `terminal_id`, `phone_number`, `terminal_serial`). | Fork: derive `yes` when `call_type & 0x0f == 0x06`; send the terminal phone number. Bridge: forward the flag and build the full `terminal` object. | T13, T16 |
-| 4 | WAPI group for this front end. Do not name it `millennium` (already CARDMAN's DB binding). | CARDMAN config (`users.conf`, `web_routes.conf`, `transactions.conf`) via CARDMAN review; bridge cert CN follows the chosen name. Interim: `agi`. | D3, T16 |
+| 4 | Bridge authenticates under the payphone WAPI group (not `millennium`). | Group created in CARDMAN (pre-work item 1); bridge cert CN follows it. Interim: `agi`. | Pre-work 1, T16 |
 
 - Acceptance: against a CARDMAN dev stack, approve/decline round-trip
   succeeds with no 400 from CAUT; an international dial produces an
   `INTL` hold; a retried auth within a session yields the same
   `auth_code`; a CDR's billed amount comes from CDRI, not the bridge;
   the bridge authenticates under the agreed group.
-- The bridge and CARDMAN items are outside this repo. They are listed
-  here so the plan is complete; the owner approves and schedules them
-  in their own repos.
+- Bridge items are in the integration repo (T16, owner approval).
+  CARDMAN-side items are pre-work, not this phase.
 
 ### P2. CDR durability (G1)
 - Implement D1's chosen approach (withhold ACK on transport/`INTERNAL`

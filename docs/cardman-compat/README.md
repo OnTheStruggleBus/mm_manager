@@ -9,6 +9,7 @@ No code in this directory, and nothing here changes runtime behavior.
 | [`ARCHITECTURE_ANALYSIS.md`](ARCHITECTURE_ANALYSIS.md) | Current-state architecture of the fork, the auth and CDR data flows, and the gaps found, with file:line citations. |
 | [`COMPATIBILITY_PLAN.md`](COMPATIBILITY_PLAN.md) | Target architecture, phased roadmap, acceptance criteria, risks, and decisions needed from the owner. |
 | [`THREAT_MODEL.md`](THREAT_MODEL.md) | Every place card data (PAN/PIN) flows or lands, and the control each one needs. |
+| [`PREWORK.md`](PREWORK.md) | CARDMAN-side pre-work (done in MCardSys before live testing), with a ready-to-use prompt for a CARDMAN session. |
 | [`CARDMAN_2.5_ALIGNMENT.md`](CARDMAN_2.5_ALIGNMENT.md) | Contract check against CARDMAN (MCardSys) 2.5: what changed, what the bridge and fork must send. |
 
 Agent-facing task cards derived from this plan live in

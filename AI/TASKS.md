@@ -121,8 +121,8 @@ Status: all cards **not started** as of 2026-10-13.
   `generate_intl_sbr.py`/`generate_lcd*.py` encoders), sync job docs,
   `tables/cardman/`.
 - **Needs**: a `mediation` (or `admin`) WAPI credential held by the sync
-  job, not by mm_manager; owner/CARDMAN decision on the display
-  tolerance (base rows only, see O1 "Known limit").
+  job, not by mm_manager; pre-work items 2 and 3 (rate data that
+  matches billing, `/api/rates` failing closed).
 - **Done when**: O1 acceptance passes; unit tests cover version-change
   detection, empty/partial response rejection, and row-to-table mapping.
 
@@ -145,9 +145,10 @@ Status: all cards **not started** as of 2026-10-13.
   `requested_at`, `international`, and the full `terminal` object to
   CAUT; remove `RateCache` and send the reported `charge_cents` to CDRI;
   treat CDRI `INTERNAL` and transport errors as retryable and every other
-  state as delivered; use the WAPI group agreed in D3 (not
+  state as delivered; use the WAPI group from pre-work item 1 (not
   `millennium`).
-- **Depends on**: T13 (fork sends the new fields); D3 for the group.
+- **Depends on**: T13 (fork sends the new fields); pre-work item 1
+  (`docs/cardman-compat/PREWORK.md`) for the group.
 - **Done when**: the bridge's mock CARDMAN enforces CAUT's required
   fields and the bridge passes; a run against a CARDMAN dev stack meets
   P1b acceptance.

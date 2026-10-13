@@ -53,6 +53,6 @@ In the **integration repo's bridge** (owner action; not edited from here):
   state as delivered.
 - Choose a WAPI group name other than `millennium`.
 
-On the **CARDMAN side** (owner/CARDMAN review):
-- New WAPI group for this front end (or accept reuse of `agi`).
-- Optionally fix the stale PIN comment in `auth.rexx`.
+On the **CARDMAN side**: see [`PREWORK.md`](PREWORK.md) (WAPI group,
+rate data, `/api/rates` fixes, contract confirmations, stale PIN
+comment, ADR).
