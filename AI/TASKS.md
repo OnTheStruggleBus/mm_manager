@@ -38,15 +38,19 @@ Status: all cards **not started** as of 2026-10-13.
 - **Files**: `src/mm_cardman_redact.c` (new), hooks in `src/mm_proto.c`,
   `src/mm_serial.c`, `src/mm_manager.c` option parsing.
 - **Done when**: replaying T2 with `-vvv -l -p` produces no test PAN or
-  PIN in any output (automated in T9).
+  PIN in any output, checked by decoding each artifact in ASCII and
+  packed-BCD form (automated in T9).
 
-### T5. Bridge address guard and input validation (G3)
+### T5. Bridge address guard and input validation (G3, G15)
 - **Goal**: refuse non-loopback `CARDMAN_BRIDGE_ADDR` unless an explicit
   override env var is set; validate digit-only PAN/PIN/called number
-  before building JSON; decline on validation failure.
+  before building JSON; require `auth_code` to be exactly 8 hex chars
+  (fully consumed, no overflow) before approving; decline on any
+  validation failure.
 - **Files**: `src/mm_cardman_bridge.c`.
 - **Done when**: unit tests cover loopback, non-loopback, override,
-  and bad-input cases.
+  and bad-input cases, including `auth_code` values `bogus`, `""`,
+  `123`, `A1B2C3D4X`, and `FFFFFFFFF`.
 
 ### T6. Unknown auth/CDR table handling (G4)
 - **Goal**: explicit cases for 0x01, 0x04, 0x3d, 0x46: decline any auth
@@ -59,9 +63,11 @@ Status: all cards **not started** as of 2026-10-13.
 - **Done when**: replay with a synthetic 0x01 request yields a decline.
 
 ### T7. CDR durability (G1) - **needs decision D1**
-- **Goal**: no CDR is lost when the bridge or CARDMAN is down.
+- **Goal**: no CDR is lost when the bridge or CARDMAN is down, by
+  withholding the ACK on transport/`INTERNAL` failure. Do not add a
+  local unmasked outbox unless the owner has amended `SECURITY_RULES.md`.
 - **Files**: `src/mm_manager.c` (`DLOG_MT_CALL_DETAILS`,
-  `DLOG_MT_END_DATA`), possibly `src/mm_cardman_outbox.c` (new).
+  `DLOG_MT_END_DATA`).
 - **Done when**: replay with the stub bridge stopped, then restarted,
   delivers every `cdr_id` exactly once.
 
@@ -88,13 +94,8 @@ Status: all cards **not started** as of 2026-10-13.
 - **Done when**: verified on hardware that a CARDMAN test card triggers
   a 0x02 auth request.
 
-### T11. Rate-table generator (G8)
-- **Goal**: generate terminal rate tables from CARDMAN's `GET /api/rates`
-  so the displayed price matches what CDRI charges (CDRI rates every
-  call, CARDMAN ADR 8).
-- **Files**: `generate_cardman_rates.py` (new).
-- **Needs**: a credential in the `mediation` or `admin` WAPI group (the
-  only groups allowed on `/api/rates`).
+### T11. Rate-table generator (G8) - superseded by T14
+- Folded into T14, which covers the full sync pipeline.
 
 ### T13. Complete the CAUT/CDRI payload (G14) - do before T7
 - **Goal**: fork side of `docs/cardman-compat/CARDMAN_2.5_ALIGNMENT.md`.
@@ -109,6 +110,32 @@ Status: all cards **not started** as of 2026-10-13.
 - **Depends on**: matching bridge change in the integration repo (owner).
 - **Done when**: stub bridge asserts the fields; against a CARDMAN dev
   stack CAUT returns no 400 and an international dial gets an `INTL` hold.
+
+### T14. Load terminal rate tables from CARDMAN (objective O1)
+- **Goal**: scheduled sync from `GET /api/rates` to per-terminal rate,
+  international SBR, and LCD tables, delivered by the existing table
+  download on next call-in. Keep last good tables on any failed or
+  suspicious pull.
+- **Files**: `generate_cardman_rates.py` (new, reusing
+  `generate_intl_sbr.py`/`generate_lcd*.py` encoders), sync job docs,
+  `tables/cardman/`.
+- **Needs**: a `mediation` (or `admin`) WAPI credential held by the sync
+  job, not by mm_manager; owner/CARDMAN decision on the display
+  tolerance (base rows only, see O1 "Known limit").
+- **Done when**: O1 acceptance passes; unit tests cover version-change
+  detection, empty/partial response rejection, and row-to-table mapping.
+
+### T15. API integration hardening (objective O2)
+- **Goal**: O2 items 1 to 6: versioned JSON schemas for the
+  mm_manager <-> bridge contract, strict request/response validation,
+  error-mapping table implemented and tested, bounded timeouts, contract
+  tests in CI, scheduled drift check against MCardSys `API_CONTRACTS.md`
+  and `ratesrv.rexx`.
+- **Files**: `docs/cardman-compat/contract/` (schemas), `tests/`,
+  `src/mm_cardman_bridge.c`, `tools/cardman_stub_bridge.py`, a workflow.
+- **Depends on**: T5, T13.
+- **Done when**: contract tests fail on any field rename/removal on
+  either hop; every CAUT disposition and CDRI state has a test.
 
 ### T12. Linux-only CARDMAN release and docs (G9, D2)
 - **Goal**: README states CARDMAN mode is Linux-only; release workflow

@@ -31,8 +31,10 @@
 2. `ctest` passes.
 3. For card-path changes: run a playback session against
    `tools/cardman_stub_bridge.py` in approve, `--decline`, and
-   bridge-stopped modes, and grep all outputs (stdout, `-l` log, pcap,
-   `mm_manager.db`) for the test PAN and PIN.
+   bridge-stopped modes, then decode every output (stdout, `-l` hex lines
+   reassembled into bytes, pcap payloads, `mm_manager.db` rows) and
+   search for the test PAN and PIN in both ASCII and packed-BCD form. A
+   plain grep misses packed and line-split data.
 4. Re-read the diff against `SECURITY_RULES.md`'s checklist.
 
 Report results honestly: if something was not tested (no hardware, no

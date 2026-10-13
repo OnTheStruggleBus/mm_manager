@@ -27,8 +27,8 @@ mm_manager process in this fork. Line numbers at commit `3e173a3`.
 | `-u` UDP mirror (`mm_proto.c` L344-345, L462-463) | **Full PAN, PIN**, over the network | Open (G2) | Disable in CARDMAN builds. |
 | Bridge request (`mm_cardman_bridge.c` L235-237) | Full PAN, PIN, plaintext HTTP | By design, but unrestricted destination (G3) | Loopback/UDS only; digit validation. |
 | Process memory / stack buffers | Full PAN, PIN | Inherent | Zero `pan_string`/`pin_string` after use (low cost, defense in depth). |
-| `mm_manager.db` file | Masked data only | OK | File mode 0600; document location. |
-| Future CDR outbox (P2, D1b only) | Unmasked PAN | Would be new | Delete on delivery, 0600, never in logs; prefer D1a to avoid it. |
+| `mm_manager.db` file | Masked data only | Open: created by `sqlite3_open()` with default 0644 less umask (`mm_sqlite3.c` L198-207) | Create with 0600 (or set umask) in CARDMAN builds; document location. |
+| CDR outbox (D1b, not planned) | Unmasked PAN | Not allowed by `SECURITY_RULES.md` rule 2 | Only if the owner amends the rule: encryption at rest, retention cap, outage alarm. D1a avoids it. |
 | Recorded `.dlog` fixtures in repo | Whatever was captured | Future | Only synthetic test PANs; CI check that rejects real-looking PANs (Luhn-valid non-test BINs). |
 
 ## Trust boundaries

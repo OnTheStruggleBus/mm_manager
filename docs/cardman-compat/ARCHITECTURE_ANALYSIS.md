@@ -102,14 +102,16 @@ Severity: **B** = blocks real-money use, **H** = high, **M** = medium.
 | G12 | M | **Single-line scaling.** One process per modem line. Multiple lines need multiple processes, each with its own working directory (DB + terminal tables). There is no shared state, which is fine, but it must be documented and supervised. | `mm_manager.c` L587, main loop. |
 | G13 | Low | **Doc drift.** Integration repo cites "154 table types" (its `claude.md`) while the fork README and proposal count 78 defined; SOW refers to branch `phase-2-cdr-wiring`, but the work is merged on `main`. Recorded here only; the integration repo is not edited from this fork. | Integration repo `claude.md`, `SOW.md`. |
 | G14 | B | **Bridge payload does not satisfy current CAUT.** CAUT requires `seq_num` and `requested_at` and uses `international` and the `terminal` object; neither mm_manager nor the bridge sends them. See [`CARDMAN_2.5_ALIGNMENT.md`](CARDMAN_2.5_ALIGNMENT.md) C1, C3, C10. | `mm_cardman_bridge.c` L235-237; MCardSys `auth.rexx`. |
+| G15 | H | **`auth_code` from the bridge is not validated.** On an approve, the client passes the string straight to `strtoul()` with no check for length, hex content, overflow, or full consumption, then approves. `"auth_code":"bogus"` is accepted as code 0, so the CDR can never match its HOLD. (Found by PR review.) | `mm_cardman_bridge.c` L255-266. |
 
 ## 5. What is already right and should be kept
 
 - The integration-repo decision to patch a few call sites rather than
   wrap the binary holds up: the CARDMAN touchpoints really are two
   `case` blocks plus accounting sinks.
-- Fail-closed authorization is implemented correctly for every error
-  path in `cardman_bridge_authorize()`.
+- Fail-closed authorization covers transport errors, a missing
+  `approved` field, and a missing `auth_code`. It does not yet validate
+  the `auth_code` value itself (G15).
 - Keeping WAPI credentials and mTLS in a separate bridge process means
   the C process never holds CARDMAN secrets.
 - The delta against upstream `hharte/mm_manager` is small and isolated,
