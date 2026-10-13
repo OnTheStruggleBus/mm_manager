@@ -160,8 +160,14 @@ endif()
 set(CARDMAN_GLUE_SRC "src/mm_cardman.c" "src/mm_cardman.h" "src/mm_cardman_bridge.c" "src/mm_cardman_bridge.h")
 add_executable (mm_cardman_test "tests/mm_cardman_test.c" ${CARDMAN_GLUE_SRC})
 TARGET_LINK_LIBRARIES(mm_cardman_test mm_util)
-add_executable (mm_cardman_drive "tests/mm_cardman_drive.c" ${CARDMAN_GLUE_SRC})
-TARGET_LINK_LIBRARIES(mm_cardman_drive mm_util)
+# The driver also persists through the production accounting code
+# (MM_CARDMAN_DRIVE_DB), so it links the database sources too.
+add_executable (mm_cardman_drive "tests/mm_cardman_drive.c" ${CARDMAN_GLUE_SRC}
+    "src/mm_accounting.c" "src/mm_sqlite3.c" "src/mm_tables.c" "src/mm_config.c")
+TARGET_LINK_LIBRARIES(mm_cardman_drive mm_util sqlite3)
+if(NOT MSVC)
+TARGET_LINK_LIBRARIES(mm_cardman_drive pthread dl)
+endif()
 if(MSVC)
 TARGET_LINK_LIBRARIES(mm_cardman_test wsock32 ws2_32)
 TARGET_LINK_LIBRARIES(mm_cardman_drive wsock32 ws2_32)

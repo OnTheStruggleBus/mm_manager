@@ -9,13 +9,23 @@
 #      and inside that shell, ./scripts/seed.sh (rates + TELCO01).
 #   2. In this repo: cmake -B build && cmake --build build
 #   3. Run from this repo's root:  tools/cardman_live_test.sh
+#      (needs bash, python3, sqlite3 and the docker CLI)
+#
+# Without a local toolchain, steps 2 and 3 can run in any Linux container
+# with cmake, gcc, g++, python3, sqlite3 and the docker CLI, sharing the
+# CARDMAN container's network (so 127.0.0.1:8443 is CARDMAN):
+#   docker run --rm --network container:<id> -e CONTAINER=<id> \
+#     -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src -w /src <image> \
+#     bash -c 'cmake -B build && cmake --build build && tools/cardman_live_test.sh'
 #
 # Env: CONTAINER (default: the running cardman-test:local container),
 #      CARDMAN_URL (default https://127.0.0.1:8443), PP_USER / PP_PASS
 #      (default the dev identity mm-dev / mm-dev_dev), TERMINAL.
 #
 # Uses a freshly issued test card. The card number and PIN are never
-# printed; only masked forms appear in output.
+# printed; only masked forms appear in output. The whole run's output,
+# the bridge log and the driver's mm_manager.db (TAUTH/TCDR rows written
+# by the production accounting code) are checked for them at the end.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -28,7 +38,15 @@ DRIVE=./build/mm_cardman_drive
 WORK=$(mktemp -d)
 BRIDGE_PORT=$((18400 + RANDOM % 500))
 FAILED=0
+BRIDGE_PID=
 trap 'kill $BRIDGE_PID 2>/dev/null; rm -rf "$WORK"' EXIT
+
+# Everything printed from here on also goes to $WORK/run.log, which the
+# leak check reads. A FIFO, not >(...), so it works in macOS's bash 3.2.
+mkfifo "$WORK/out"
+tee "$WORK/run.log" <"$WORK/out" &
+TEE_PID=$!
+exec 3>&1 4>&2 >"$WORK/out" 2>&1
 
 pass() { echo "   OK: $1"; }
 fail() { echo "   FAIL: $1"; FAILED=1; }
@@ -54,22 +72,35 @@ echo "   card ${PAN:0:6}****${PAN:12:4}"
 CARDMAN_BRIDGE_PASSWORD="$PP_PASS" python3 tools/cardman_bridge.py --listen "127.0.0.1:$BRIDGE_PORT" \
   --cardman-url "$CARDMAN_URL" --client-cert "$WORK/client-payphone.pem" \
   --client-key "$WORK/client-payphone-key.pem" --ca-cert "$WORK/ca.pem" --user "$PP_USER" \
-  --telco-id TELCO01 2>"$WORK/bridge.log" &
+  --telco-id TELCO01 >/dev/null 2>"$WORK/bridge.log" &
 BRIDGE_PID=$!
 sleep 1
 export CARDMAN_BRIDGE_ADDR="127.0.0.1:$BRIDGE_PORT"
-export TZ=UTC     # the driver's CDR start times are terminal-local; keep them UTC here
+# The driver's CDR start time is terminal-local. Run in a zone that is
+# not UTC so the fork's local -> UTC conversion (start_ts, cdr_id) is
+# exercised; a POSIX TZ string needs no tzdata.
+export TZ='EST5EDT,M3.2.0,M11.1.0'
+export MM_CARDMAN_DRIVE_DB="$WORK/mm_manager.db"
+
+# has_pin FILE: the PIN as a whole token. A bare substring would match
+# inside phone numbers and timestamps.
+has_pin() { grep -qE "(^|[^0-9])$PIN([^0-9]|\$)" "$1"; }
 
 # drive ARGS... -> result tokens only; fails the run if the card leaks
 drive() {
   local out; out=$("$DRIVE" "$@" 2>&1)
-  case "$out" in *"$PAN"*|*"$PIN"*) fail "card data in driver output";; esac
+  printf '%s\n' "$out" > "$WORK/drive.out"
+  if grep -qF "$PAN" "$WORK/drive.out" || has_pin "$WORK/drive.out"; then fail "card data in driver output"; fi
   grep -oE '(resp_code|auth_code|cdr)=[^ ]+' <<<"$out" | tr '\n' ' '
 }
 code_of() { grep -oE 'auth_code=[0-9A-Z]{8}' <<<"$1" | head -1 | cut -d= -f2; }
 
 S=$((1000 + RANDOM % 60000))
-NOW=$(date -u +%Y%m%d%H%M%S)
+EPOCH=$(date +%s)
+# fmt +FORMAT [-u]: $EPOCH formatted; GNU date, else BSD (options first).
+fmt() { date ${2:-} -d "@$EPOCH" "$1" 2>/dev/null || date ${2:-} -r "$EPOCH" "$1"; }
+NOW=$(fmt +%Y%m%d%H%M%S)                    # terminal-local, what the CDR carries
+NOW_UTC=$(fmt +%Y-%m-%dT%H:%M:%SZ -u)       # what CARDMAN must receive
 
 echo "== 1. approved, answered call =="
 R=$(drive auth "$TERMINAL" "$PAN" "$PIN" 3125551212 "$S" 0x55)
@@ -102,12 +133,34 @@ drive cdr "$TERMINAL" "$PAN" 5551212 $((S + 2)) "$AC4" "$NOW" 61 0x53 0 >/dev/nu
 CN=$(sql "SELECT called_number FROM cdr WHERE auth_code='$AC4'")
 [ "$CN" = "${TERMINAL:0:3}5551212" ] && pass "rated as $CN" || fail "called_number = '$CN'"
 
+echo "== 4b. international call (call type 0x56) gets an INTL hold =="
+# seed.sh's TELCO01 tariff, 180 s estimate: INTL 50+40+35 = 125c, DOM 300c.
+INTL_NO=011441632960000                    # UK drama range, as dialed
+R=$(drive auth "$TERMINAL" "$PAN" "$PIN" "$INTL_NO" $((S + 5)) 0x56)
+AC4B=$(code_of "$R")
+[[ "$R" == resp_code=0* ]] && [ -n "$AC4B" ] && pass "valid, auth_code=$AC4B" || fail "auth: $R"
+H=$(sql "SELECT amount_cents||'|'||called_number FROM holds WHERE auth_code='$AC4B'")
+[ "$H" = "125|$INTL_NO" ] && pass "INTL hold amount|number = $H" || fail "hold '$H', want 125|$INTL_NO"
+drive cdr "$TERMINAL" "$PAN" "$INTL_NO" $((S + 5)) "$AC4B" "$NOW" 61 0x56 0 >/dev/null
+ROW=$(sql "SELECT state||'|'||called_number FROM cdr WHERE auth_code='$AC4B'")
+[ "$ROW" = "MATCHED|$INTL_NO" ] && [ "$(sql "SELECT state FROM holds WHERE auth_code='$AC4B'")" = CAPTURED ] \
+  && pass "CDR MATCHED as dialed, hold CAPTURED" || fail "cdr '$ROW'"
+
 echo "== 5. approved_limited (high-risk NPA 900) is invalid and released =="
 R=$(drive auth "$TERMINAL" "$PAN" "$PIN" 9005551212 $((S + 3)) 0x55)
 [[ "$R" == resp_code=1* ]] && pass "invalid at the terminal" || fail "auth: $R"
 AC5=$(grep -oE 'disposition=approved_limited auth_code=[0-9A-Z]{8}' "$WORK/bridge.log" | tail -1 | cut -d= -f3)
 ST=$(sql "SELECT state FROM holds WHERE auth_code='$AC5'")
 [ "$ST" = RELEASED ] && pass "its hold RELEASED" || fail "approved_limited hold state '$ST'"
+
+echo "== 5b. a CARDMAN decline (wrong PIN) is invalid, no hold =="
+BAD_PIN=$(printf %04d $(( (10#$PIN + 1) % 10000 )))
+HOLDS=$(sql "SELECT count(*) FROM holds WHERE pan='$PAN'")
+R=$(drive auth "$TERMINAL" "$PAN" "$BAD_PIN" 3125551212 $((S + 4)) 0x55)
+[[ "$R" == "resp_code=1 auth_code=- " ]] && pass "invalid at the terminal, no auth_code" || fail "auth: $R"
+grep -q "seq=$((S + 4)) .*disposition=declined auth_code=None -> invalid" "$WORK/bridge.log" \
+  && pass "bridge saw disposition=declined" || fail "no declined line in bridge log"
+[ "$(sql "SELECT count(*) FROM holds WHERE pan='$PAN'")" = "$HOLDS" ] && pass "no hold placed" || fail "decline placed a hold"
 
 echo "== 6. actor stamps and cdr rows =="
 A=$(sql "SELECT actor FROM journal WHERE auth_code='$AC1' AND type='HOLD'")
@@ -116,10 +169,44 @@ A=$(sql "SELECT actor FROM journal WHERE auth_code='$AC1' AND type='CAPTURE'")
 [ "$A" = "mediation:$PP_USER" ] && pass "CAPTURE actor $A" || fail "CAPTURE actor '$A'"
 ROW=$(sql "SELECT source||'|'||switch_id||'|'||ani||'|'||reported_charge_cents FROM cdr WHERE auth_code='$AC1' ORDER BY received_ts LIMIT 1")
 [ "$ROW" = "mm_manager|$TERMINAL|$TERMINAL|175" ] && pass "cdr source|switch_id|ani|reported = $ROW" || fail "cdr row '$ROW'"
+ROW=$(sql "SELECT cdr_id||'|'||to_char(start_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM cdr WHERE auth_code='$AC1' ORDER BY received_ts LIMIT 1")
+[ "$ROW" = "mm-$TERMINAL-$S-$NOW_UTC|$NOW_UTC" ] && pass "terminal-local $NOW ($TZ) arrived as start_ts $NOW_UTC" \
+  || fail "cdr_id|start_ts '$ROW', want UTC $NOW_UTC"
 
-if grep -q -e "$PAN" -e "\"$PIN\"" "$WORK/bridge.log"; then fail "card data in bridge log"; else pass "bridge log has no card data"; fi
+echo "== 7. card data at rest and in output =="
+DB="$MM_CARDMAN_DRIVE_DB"
+MASKED="${PAN:0:6}****${PAN:12:4}"
+lite() { sqlite3 "$DB" "$1"; }
+# One row per (terminal, seq): TAUTH and TCDR are UNIQUE on it and the
+# retries/resends above are deduplicated, so 6 auths and 4 CDRs.
+N=$(lite "SELECT count(*) FROM TAUTH WHERE CARD_NUMBER='$MASKED'")
+[ "$N" = 6 ] && [ "$(lite "SELECT count(*) FROM TAUTH WHERE CARD_NUMBER<>'$MASKED'")" = 0 ] \
+  && pass "TAUTH: $N rows, CARD_NUMBER only ever $MASKED" || fail "TAUTH CARD_NUMBER not all $MASKED"
+N=$(lite "SELECT count(*) FROM TCDR WHERE CARD='$MASKED'")
+[ "$N" = 4 ] && [ "$(lite "SELECT count(*) FROM TCDR WHERE CARD<>'$MASKED'")" = 0 ] \
+  && pass "TCDR: $N rows, CARD only ever $MASKED" || fail "TCDR CARD not all $MASKED"
+[ -z "$(lite "SELECT name FROM pragma_table_info('TAUTH') WHERE name LIKE '%PIN%'
+              UNION SELECT name FROM pragma_table_info('TCDR') WHERE name LIKE '%PIN%'")" ] \
+  && pass "TAUTH/TCDR have no PIN column" || fail "PIN column in TAUTH/TCDR"
+# Rule 9: also look for packed BCD (a blob's hex is the digits themselves)
+# and for ASCII digits stored as a blob (hex 3x per digit).
+sqlite3 "$DB" .dump > "$WORK/db.dump"
+PAN_HEX=$(printf '%s' "$PAN" | od -An -tx1 | tr -d ' \n')
+if grep -qiF -e "$PAN" -e "$PAN_HEX" "$WORK/db.dump" || grep -qE "'$PIN'" "$WORK/db.dump"; then
+  fail "card data in mm_manager.db"; else pass "mm_manager.db dump has no PAN (text, BCD, ASCII blob) or PIN"; fi
+if grep -qF "$PAN" "$WORK/bridge.log" || has_pin "$WORK/bridge.log"; then fail "card data in bridge log"; else pass "bridge log has no card data"; fi
+kill $BRIDGE_PID 2>/dev/null; BRIDGE_PID=
 
 echo
 echo "bridge log: (kept only for this run)"; sed 's/^/   /' "$WORK/bridge.log"
+
+# Close the FIFO, let tee finish, then check everything this run printed.
+exec 1>&3 2>&4 3>&- 4>&-
+wait "$TEE_PID"
+if grep -qF "$PAN" "$WORK/run.log" || has_pin "$WORK/run.log"; then
+  echo "   FAIL: card data in this run's output"; FAILED=1
+else
+  echo "   OK: this run's output ($(wc -l <"$WORK/run.log" | tr -d ' ') lines) has no PAN or PIN"
+fi
 [ "$FAILED" -eq 0 ] && { echo "RESULT: PASS"; exit 0; }
 echo "RESULT: FAILURES ABOVE"; exit 1

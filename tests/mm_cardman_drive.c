@@ -11,6 +11,11 @@
  *                        <duration_secs> <call_type> <cost_cents>
  *       start time is the terminal's local time; prints "cdr=<rc>".
  *
+ * With MM_CARDMAN_DRIVE_DB=<file> set, each record is also written to
+ * that SQLite database with mm_acct_save_TAUTH()/mm_acct_save_TCDR(),
+ * before the glue runs, as process_mm_table() does. That lets a live
+ * run check what mm_manager persists (masked PAN, no PIN).
+ *
  * Test PANs only (AI/SECURITY_RULES.md rule 7). PAN and PIN are never
  * printed.
  */
@@ -19,6 +24,11 @@
 #include <string.h>
 
 #include "src/mm_cardman.h"
+#include "src/mm_manager.h"
+
+/* NULL unless MM_CARDMAN_DRIVE_DB is set. */
+static void *drive_db;
+static mm_telco_t drive_telco = { { 'T', 'C' }, { 'R', 'G', 'N' } };
 
 /* Packs a digit string into BCD, two digits per byte, 0xE terminated
  * and 0xE padded - the terminal's encoding.
@@ -68,6 +78,10 @@ static int drive_auth(int argc, char **argv) {
     req.call_type = (uint8_t)strtoul(argv[7], NULL, 0);
     req.service_code = 101;
 
+    if (drive_db != NULL && mm_acct_save_TAUTH(drive_db, &drive_telco, argv[2], &req) != 0) {
+        fprintf(stderr, "TAUTH insert failed\n");
+        return 1;
+    }
     for (int i = 0; i < repeat; i++) {
         uint8_t  resp_code;
         uint64_t auth_code;
@@ -121,17 +135,28 @@ static int drive_cdr(char **argv) {
     cdr.call_type = (uint8_t)strtoul(argv[9], NULL, 0);
     cdr.call_cost[1] = (uint32_t)atoi(argv[10]);
 
+    if (drive_db != NULL && mm_acct_save_TCDR(drive_db, &drive_telco, argv[2], &cdr) != 0) {
+        fprintf(stderr, "TCDR insert failed\n");
+        return 1;
+    }
     printf("cdr=%d\n", cardman_forward_cdr(argv[2], &cdr));
     return 0;
 }
 
 int main(int argc, char **argv) {
+    const char *db_file = getenv("MM_CARDMAN_DRIVE_DB");
+    int rc = 2;
+
+    if (db_file != NULL && *db_file != '\0' && (drive_db = mm_open_database(db_file)) == NULL) {
+        return 1;
+    }
     if (argc >= 8 && strcmp(argv[1], "auth") == 0) {
-        return drive_auth(argc, argv);
+        rc = drive_auth(argc, argv);
+    } else if (argc == 11 && strcmp(argv[1], "cdr") == 0) {
+        rc = drive_cdr(argv);
+    } else {
+        fprintf(stderr, "usage: see the comment at the top of tests/mm_cardman_drive.c\n");
     }
-    if (argc == 11 && strcmp(argv[1], "cdr") == 0) {
-        return drive_cdr(argv);
-    }
-    fprintf(stderr, "usage: see the comment at the top of tests/mm_cardman_drive.c\n");
-    return 2;
+    mm_close_database(drive_db);
+    return rc;
 }
