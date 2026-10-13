@@ -34,6 +34,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import socketserver
 import ssl
 import sys
@@ -66,6 +67,15 @@ AUTH_CODE_RE = re.compile(r"^[0-9A-Z]{8}$")
 ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 DIGITS_RE = re.compile(r"^\d+$")
 CDR_ID_RE = re.compile(r'^[^"\\]{1,128}$')
+
+
+def host_is_loopback(host):
+    """True when host resolves only to loopback addresses."""
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (OSError, UnicodeError):
+        return False
+    return bool(infos) and all(ipaddress.ip_address(i[4][0].split("%")[0]).is_loopback for i in infos)
 
 
 def log(msg):
@@ -117,7 +127,9 @@ def terminal_verdict(caut_status, caut_body):
     if caut_status != 200 or not isinstance(caut_body, dict):
         return False, None, None
     disposition = caut_body.get("disposition")
-    auth_code = caut_body.get("auth_code") or caut_body.get("transaction_ref") or ""
+    # auth_code only: transaction_ref carries the same value in a
+    # well-formed response, so a body without auth_code is malformed.
+    auth_code = caut_body.get("auth_code") or ""
     if disposition == "approved" and AUTH_CODE_RE.match(str(auth_code)):
         return True, disposition, auth_code
     return False, disposition, auth_code if AUTH_CODE_RE.match(str(auth_code)) else None
@@ -191,6 +203,10 @@ class CardmanClient:
         u = urllib.parse.urlsplit(base_url)
         if u.scheme not in ("http", "https"):
             raise ValueError(f"unsupported scheme in {base_url}")
+        # Plain http carries PAN/PIN unencrypted and without the payphone
+        # identity: it exists for the loopback test mock only.
+        if u.scheme == "http" and not host_is_loopback(u.hostname or ""):
+            raise ValueError("http:// is allowed for a loopback test mock only; use https://")
         self.scheme, self.host = u.scheme, u.hostname
         self.port = u.port or (443 if u.scheme == "https" else 80)
         self.auth = None
@@ -458,7 +474,10 @@ def main(argv=None):
     if not ipaddress.ip_address(host).is_loopback:
         p.error("--listen must be a loopback address: card data must not leave this host unencrypted")
 
-    client = CardmanClient(a.cardman_url, a.client_cert, a.client_key, a.ca_cert, a.user, password)
+    try:
+        client = CardmanClient(a.cardman_url, a.client_cert, a.client_key, a.ca_cert, a.user, password)
+    except ValueError as exc:
+        p.error(str(exc))
     server = Server((host, int(port)), Handler)
     server.bridge = Bridge(client, telco_id=a.telco_id)
     log(f"listening on {host}:{port} -> {a.cardman_url} as {a.user}")

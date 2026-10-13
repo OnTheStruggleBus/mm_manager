@@ -105,11 +105,24 @@ int cardman_terminal_ts_to_utc(const uint8_t ts[6], char *out, size_t out_len) {
     local.tm_mday  = ts[2];
     local.tm_hour  = ts[3];
     local.tm_min   = ts[4];
-    local.tm_sec   = ts[5];
+    local.tm_sec   = (ts[5] == 60) ? 59 : ts[5];   /* leap second: added back below */
     local.tm_isdst = -1;
 
     t = mktime(&local);
-    if (t == (time_t)-1 || utc_time(&t, &utc) == NULL) {
+    if (t == (time_t)-1) {
+        return -1;
+    }
+    /* mktime() normalizes rather than rejects: 31 Feb would become
+     * 3 Mar, a different start_ts and cdr_id. The date must survive the
+     * round trip. The time of day may move: a time inside a DST
+     * spring-forward gap is shifted, not refused, so the CDR is still
+     * sent and its hold released.
+     */
+    if (local.tm_year != ts[0] || local.tm_mon != ts[1] - 1 || local.tm_mday != ts[2]) {
+        return -1;
+    }
+    t += (ts[5] == 60) ? 1 : 0;
+    if (utc_time(&t, &utc) == NULL) {
         return -1;
     }
     if (strftime(out, out_len, "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {

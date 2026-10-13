@@ -61,7 +61,7 @@ def derive_calltype(cn):
 
 
 class MockCardman:
-    USER, PASSWORD = "mm-dev", "mm-dev_dev"
+    USER, PASSWORD = "mm-dev", "mock-only-not-a-cardman-password"
 
     def __init__(self):
         self.balance = 2000
@@ -182,6 +182,17 @@ class Pure(unittest.TestCase):
         self.assertFalse(v(200, None)[0])
         for bad in ("bogus", "", "a1b2c3d4", "A1B2C3D4X", "A1B2C3D"):
             self.assertFalse(v(200, {"disposition": "approved", "auth_code": bad})[0], bad)
+        # transaction_ref is not a substitute for a missing auth_code.
+        self.assertFalse(v(200, {"disposition": "approved", "transaction_ref": "A1B2C3D4"})[0])
+        self.assertFalse(v(200, {"disposition": "approved", "auth_code": "", "transaction_ref": "A1B2C3D4"})[0])
+        self.assertFalse(v(200, {"disposition": "approved", "auth_code": None, "transaction_ref": "A1B2C3D4"})[0])
+
+    def test_http_only_to_loopback(self):
+        for url in ("http://127.0.0.1:8443", "http://localhost:8443", "http://[::1]:8443"):
+            cb.CardmanClient(url)
+        for url in ("http://192.0.2.1:8443", "http://10.0.0.1", "http://[2001:db8::1]:8443", "ftp://127.0.0.1"):
+            with self.assertRaises(ValueError, msg=url):
+                cb.CardmanClient(url)
 
     def test_cdr_fields(self):
         self.assertEqual(cb.cdr_duration_secs({"call_type": 0x51, "duration_secs": 25}), 0)
@@ -351,6 +362,73 @@ class EndToEnd(unittest.TestCase):
         # a CDR without a CARDMAN auth_code is not forwarded
         self.assertEqual(run("cdr", TERMINAL, TEST_PAN, "3125551212", "42", "-", "20261013184600",
                              "30", "0x55", "0"), ["cdr=0"])
+
+
+@unittest.skipUnless(os.environ.get("MM_CARDMAN_DRIVE"), "set MM_CARDMAN_DRIVE to the built driver")
+class ForkRejectsBrokenBridge(unittest.TestCase):
+    """The C client must fail closed on a bridge response that is not a
+    complete HTTP 200 carrying one flat JSON object, even when the bytes
+    it did get say approved/delivered."""
+
+    APPROVED = b'{"approved": true, "disposition": "approved", "auth_code": "0Q7KX2LM"}'
+    DELIVERED = b'{"delivered": true, "state": "MATCHED"}'
+
+    def raw_bridge(self, reply):
+        import socket as so
+        srv = so.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+
+        def serve_one():
+            while True:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    return
+                with c:
+                    c.settimeout(5)
+                    c.recv(4096)
+                    c.sendall(reply)
+        threading.Thread(target=serve_one, daemon=True).start()
+        self.addCleanup(srv.close)
+        return f"127.0.0.1:{srv.getsockname()[1]}"
+
+    def run_drive(self, addr, *args):
+        out = subprocess.run([os.environ["MM_CARDMAN_DRIVE"], *args], capture_output=True, text=True, timeout=60,
+                             env=dict(os.environ, CARDMAN_BRIDGE_ADDR=addr, TZ="UTC"))
+        return [w for w in out.stdout.split() if w.startswith(("resp_code=", "auth_code=", "cdr="))]
+
+    def auth(self, reply):
+        return self.run_drive(self.raw_bridge(reply), "auth", TERMINAL, TEST_PAN, TEST_PIN, "3125551212", "31", "0x55")
+
+    def cdr(self, reply):
+        return self.run_drive(self.raw_bridge(reply), "cdr", TERMINAL, TEST_PAN, "3125551212", "31", "0Q7KX2LM",
+                              "20261013184300", "95", "0x55", "175")
+
+    def frame(self, body, length=None, status=b"200 OK"):
+        n = len(body) if length is None else length
+        return b"HTTP/1.0 " + status + b"\r\nContent-Length: " + str(n).encode() + b"\r\n\r\n" + body
+
+    def test_well_formed_still_works(self):
+        self.assertEqual(self.auth(self.frame(self.APPROVED)), ["resp_code=0", "auth_code=0Q7KX2LM"])
+        self.assertEqual(self.cdr(self.frame(self.DELIVERED)), ["cdr=1"])
+
+    def test_truncated_body_fails_closed(self):
+        self.assertEqual(self.auth(self.frame(self.APPROVED[:-10], length=len(self.APPROVED))),
+                         ["resp_code=1", "auth_code=-"])
+        self.assertEqual(self.cdr(self.frame(self.DELIVERED[:-5], length=len(self.DELIVERED))), ["cdr=-1"])
+
+    def test_malformed_json_fails_closed(self):
+        for body in (b'{"approved": true, "auth_code": "0Q7KX2LM"} trailing',
+                     b'{"approved": false, "approved": true, "auth_code": "0Q7KX2LM"}',
+                     b'{"x": {"approved": true, "auth_code": "0Q7KX2LM"}}',
+                     b'{"approved": true, "auth_code": "0Q7KX2LM",}'):
+            self.assertEqual(self.auth(self.frame(body)), ["resp_code=1", "auth_code=-"], body)
+        self.assertEqual(self.cdr(self.frame(b'{"note": "x", "delivered": true')), ["cdr=-1"])
+
+    def test_no_content_length_or_non_200_fails_closed(self):
+        self.assertEqual(self.auth(b"HTTP/1.0 200 OK\r\n\r\n" + self.APPROVED), ["resp_code=1", "auth_code=-"])
+        self.assertEqual(self.auth(self.frame(self.APPROVED, status=b"500 Oops")), ["resp_code=1", "auth_code=-"])
 
 
 if __name__ == "__main__":

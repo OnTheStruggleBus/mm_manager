@@ -8,6 +8,159 @@
 
 #include "mm_cardman_bridge.h"
 
+/* Skips JSON whitespace. */
+static const char *json_ws(const char *p) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        p++;
+    }
+    return p;
+}
+
+/* Parses a JSON string with no escapes, returning a pointer past its
+ * closing quote, or NULL. The bridge's responses never need escapes, and
+ * without them no value can contain a quote, so a "key": needle can only
+ * ever match a real key.
+ */
+static const char *json_plain_string(const char *p, const char **start, size_t *len) {
+    if (*p != '"') {
+        return NULL;
+    }
+    p++;
+    *start = p;
+    while (*p != '"') {
+        if (*p == '\0' || *p == '\\' || (unsigned char)*p < 0x20) {
+            return NULL;
+        }
+        p++;
+    }
+    *len = (size_t)(p - *start);
+    return p + 1;
+}
+
+int cardman_bridge_json_flat_ok(const char *body) {
+    const char *keys[CARDMAN_BRIDGE_JSON_MAX_KEYS];
+    size_t      key_lens[CARDMAN_BRIDGE_JSON_MAX_KEYS];
+    int         nkeys = 0;
+    const char *p = json_ws(body);
+
+    if (*p++ != '{') {
+        return 0;
+    }
+    p = json_ws(p);
+    if (*p == '}') {
+        return *json_ws(p + 1) == '\0';
+    }
+    for (;;) {
+        const char *k, *v;
+        size_t      klen, vlen;
+
+        if ((p = json_plain_string(p, &k, &klen)) == NULL || nkeys == CARDMAN_BRIDGE_JSON_MAX_KEYS) {
+            return 0;
+        }
+        for (int i = 0; i < nkeys; i++) {
+            if (key_lens[i] == klen && memcmp(keys[i], k, klen) == 0) {
+                return 0;                      /* duplicate key: ambiguous */
+            }
+        }
+        keys[nkeys] = k;
+        key_lens[nkeys++] = klen;
+
+        p = json_ws(p);
+        if (*p++ != ':') {
+            return 0;
+        }
+        p = json_ws(p);
+        if (*p == '"') {
+            if ((p = json_plain_string(p, &v, &vlen)) == NULL) {
+                return 0;
+            }
+        } else if (strncmp(p, "true", 4) == 0) {
+            p += 4;
+        } else if (strncmp(p, "false", 5) == 0) {
+            p += 5;
+        } else if (strncmp(p, "null", 4) == 0) {
+            p += 4;
+        } else {
+            const char *n = p;
+
+            if (*p == '-') {
+                p++;
+            }
+            while (*p >= '0' && *p <= '9') {
+                p++;
+            }
+            if (p == n || (*n == '-' && p == n + 1)) {
+                return 0;                      /* nested value, or garbage */
+            }
+        }
+        p = json_ws(p);
+        if (*p == ',') {
+            p = json_ws(p + 1);
+            continue;
+        }
+        if (*p == '}') {
+            return *json_ws(p + 1) == '\0';
+        }
+        return 0;
+    }
+}
+
+int cardman_bridge_http_body(const char *response, size_t response_len, char *out_body, size_t out_body_len) {
+    const char *end_of_headers;
+    const char *cl;
+    size_t      header_len, body_len, content_length = 0;
+    int         have_length = 0;
+
+    /* Status line must be exactly "HTTP/1.x 200 ...". */
+    if (response_len < 13 || strncmp(response, "HTTP/1.", 7) != 0 || strncmp(response + 8, " 200", 4) != 0 ||
+        (response[12] != ' ' && response[12] != '\r')) {
+        return -1;
+    }
+    end_of_headers = strstr(response, "\r\n\r\n");
+    if (end_of_headers == NULL) {
+        return -1;
+    }
+    header_len = (size_t)(end_of_headers - response) + 4;
+    body_len = response_len - header_len;
+
+    /* The body must be exactly Content-Length bytes: a short read is a
+     * truncated response, not a smaller one.
+     */
+    for (cl = strstr(response, "\r\n"); cl != NULL && cl < end_of_headers; cl = strstr(cl + 2, "\r\n")) {
+        const char *v = cl + 2;
+
+        if (strncmp(v, "Content-Length:", 15) != 0 && strncmp(v, "content-length:", 15) != 0) {
+            continue;
+        }
+        if (have_length) {
+            return -1;
+        }
+        v += 15;
+        while (*v == ' ') {
+            v++;
+        }
+        if (*v < '0' || *v > '9') {
+            return -1;
+        }
+        while (*v >= '0' && *v <= '9') {
+            content_length = content_length * 10 + (size_t)(*v++ - '0');
+            if (content_length > response_len) {
+                return -1;
+            }
+        }
+        if (*v != '\r' && *v != ' ') {
+            return -1;
+        }
+        have_length = 1;
+    }
+    if (!have_length || content_length != body_len || body_len >= out_body_len) {
+        return -1;
+    }
+    memcpy(out_body, end_of_headers + 4, body_len);
+    out_body[body_len] = '\0';
+    return cardman_bridge_json_flat_ok(out_body) ? 0 : -1;
+}
+
 #ifndef _WIN32
 
 #include <sys/types.h>
@@ -51,6 +204,46 @@ static int split_host_port(const char *addr, char *host, size_t host_len, char *
     return 0;
 }
 
+static int sockaddr_is_loopback(const struct sockaddr *sa) {
+    if (sa->sa_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)sa;
+
+        return (ntohl(in->sin_addr.s_addr) >> 24) == 127;
+    }
+    if (sa->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)sa;
+
+        return IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr);
+    }
+    return 0;
+}
+
+int cardman_bridge_addr_is_loopback(const char *addr) {
+    struct addrinfo hints = { 0 };
+    struct addrinfo *res = NULL, *ai;
+    char host[64];
+    char port[16];
+    int  ok;
+
+    if (split_host_port(addr, host, sizeof(host), port, sizeof(port)) != 0) {
+        return 0;
+    }
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port, &hints, &res) != 0 || res == NULL) {
+        return 0;
+    }
+    ok = 1;
+    for (ai = res; ai != NULL; ai = ai->ai_next) {
+        ok = ok && sockaddr_is_loopback(ai->ai_addr);
+    }
+    freeaddrinfo(res);
+    return ok;
+}
+
+/* Returns a connected socket, -1 if it cannot connect, or -2 if the
+ * address is not loopback.
+ */
 static int connect_with_timeout(const char *host, const char *port) {
     struct addrinfo hints = { 0 };
     struct addrinfo *res = NULL;
@@ -61,6 +254,14 @@ static int connect_with_timeout(const char *host, const char *port) {
 
     if (getaddrinfo(host, port, &hints, &res) != 0 || res == NULL) {
         return -1;
+    }
+
+    /* Card data travels in clear JSON: never to anything but this host
+     * (AI/SECURITY_RULES.md rule 5), whatever CARDMAN_BRIDGE_ADDR says.
+     */
+    if (!sockaddr_is_loopback(res->ai_addr)) {
+        freeaddrinfo(res);
+        return -2;
     }
 
     fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
@@ -192,7 +393,11 @@ static int bridge_http_post(const char *path, const char *request_body, const ch
         return -1;
     }
 
-    fd = connect_with_timeout(host, port);
+    fd = cardman_bridge_addr_is_loopback(addr) ? connect_with_timeout(host, port) : -2;
+    if (fd == -2) {
+        fprintf(stderr, "%s: bridge address %s is not loopback, refusing to send card data.\n", log_prefix, addr);
+        return -1;
+    }
     if (fd < 0) {
         fprintf(stderr, "%s: could not reach bridge at %s, failing closed.\n", log_prefix, addr);
         return -1;
@@ -220,38 +425,39 @@ static int bridge_http_post(const char *path, const char *request_body, const ch
         return -1;
     }
 
+    /* Read to EOF (the request says Connection: close). A timeout, an
+     * error or a response that does not fit is a failure, never a
+     * shorter response.
+     */
     for (;;) {
-        ssize_t n = recv(fd, response + total_read, sizeof(response) - 1 - (size_t)total_read, 0);
-        if (n <= 0) {
+        ssize_t n;
+
+        if ((size_t)total_read >= sizeof(response) - 1) {
+            close(fd);
+            fprintf(stderr, "%s: bridge response too large, failing closed.\n", log_prefix);
+            return -1;
+        }
+        n = recv(fd, response + total_read, sizeof(response) - 1 - (size_t)total_read, 0);
+        if (n == 0) {
             break;
+        }
+        if (n < 0) {
+            close(fd);
+            fprintf(stderr, "%s: no complete response from bridge (%s), failing closed.\n",
+                    log_prefix, strerror(errno));
+            return -1;
         }
         total_read += n;
-        if ((size_t)total_read >= sizeof(response) - 1) {
-            break;
-        }
     }
     close(fd);
-
-    if (total_read <= 0) {
-        fprintf(stderr, "%s: no response from bridge, failing closed.\n", log_prefix);
-        return -1;
-    }
     response[total_read] = '\0';
 
-    /* Status line must be exactly "HTTP/1.x 200 ...". */
-    if (strncmp(response, "HTTP/1.", 7) != 0 || strncmp(response + 8, " 200", 4) != 0) {
-        fprintf(stderr, "%s: bridge answered a non-200 status, failing closed.\n", log_prefix);
+    if (memchr(response, '\0', (size_t)total_read) != NULL ||
+        cardman_bridge_http_body(response, (size_t)total_read, out_body, out_body_len) != 0) {
+        fprintf(stderr, "%s: bridge response not a complete HTTP 200 with a flat JSON object, failing closed.\n",
+                log_prefix);
         return -1;
     }
-
-    char *body = strstr(response, "\r\n\r\n");
-    if (body == NULL) {
-        fprintf(stderr, "%s: malformed HTTP response, failing closed.\n", log_prefix);
-        return -1;
-    }
-    body += 4;
-
-    snprintf(out_body, out_body_len, "%s", body);
     return 0;
 }
 

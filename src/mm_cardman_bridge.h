@@ -12,6 +12,7 @@
 #ifndef MM_CARDMAN_BRIDGE_H
 #define MM_CARDMAN_BRIDGE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Default bridge address, overridable via the CARDMAN_BRIDGE_ADDR
@@ -54,6 +55,28 @@ typedef struct cardman_auth_result {
  * fail-closed, but distinguished for logging).
  */
 int cardman_bridge_authorize(const cardman_auth_request_t *req, cardman_auth_result_t *result);
+
+/* Response checks, exposed for tests/mm_cardman_test.c. */
+#define CARDMAN_BRIDGE_JSON_MAX_KEYS 16
+
+/* 1 if body is exactly one JSON object whose values are unescaped
+ * strings, integers, true, false or null, with unique keys and nothing
+ * after it; else 0.
+ */
+int cardman_bridge_json_flat_ok(const char *body);
+
+/* Copies the body of a complete "HTTP/1.x 200" response into out_body.
+ * The body must be exactly Content-Length bytes and pass
+ * cardman_bridge_json_flat_ok(). Returns 0, or -1 on anything else.
+ */
+int cardman_bridge_http_body(const char *response, size_t response_len, char *out_body, size_t out_body_len);
+
+#ifndef _WIN32
+/* 1 if "host:port" resolves only to loopback addresses, else 0. The
+ * client refuses to send anything to any other address.
+ */
+int cardman_bridge_addr_is_loopback(const char *addr);
+#endif
 
 typedef struct cardman_cdr_request {
     const char *cdr_id;          /* mm-<terminal>-<seq>-<start_ts>: stable
