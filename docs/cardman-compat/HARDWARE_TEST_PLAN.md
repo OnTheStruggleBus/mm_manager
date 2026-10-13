@@ -7,6 +7,9 @@ What still has to be proven on a physical terminal. The software path
 anything about what the terminal actually sends, or how it behaves, is
 still an assumption. This plan turns those into checks.
 
+To run it with step-by-step help in a Claude Code session, use the
+prompt in [`HARDWARE_TEST_SESSION.md`](HARDWARE_TEST_SESSION.md).
+
 Contract: [`BRIDGE_CONTRACT.md`](BRIDGE_CONTRACT.md). Open hardware
 items: its section 4. Task status: [`../../AI/TASKS.md`](../../AI/TASKS.md)
 T10, T13, T7.

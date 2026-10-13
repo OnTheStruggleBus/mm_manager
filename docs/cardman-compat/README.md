@@ -14,6 +14,7 @@ code they describe is in `src/mm_cardman*.c` and `tools/cardman_*.py`.
 | [`BRIDGE_CONTRACT.md`](BRIDGE_CONTRACT.md) | The mm_manager <-> bridge <-> CARDMAN hop contract, and the code audit it came from. |
 | [`CARDMAN_REQUESTS.md`](CARDMAN_REQUESTS.md) | Open requests for the CARDMAN owner. |
 | [`HARDWARE_TEST_PLAN.md`](HARDWARE_TEST_PLAN.md) | Checklist for a real terminal: what only hardware can prove, the SQL to check each step, and a results table. |
+| [`HARDWARE_TEST_SESSION.md`](HARDWARE_TEST_SESSION.md) | Prompt for a test-day session that walks you through the plan step by step. |
 
 Agent-facing task cards derived from this plan live in
 [`../../AI/TASKS.md`](../../AI/TASKS.md).
