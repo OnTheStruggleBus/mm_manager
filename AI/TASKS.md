@@ -133,7 +133,7 @@ other cards not started.
   UTC `start_ts`; TAUTH/TCDR hold only the masked PAN, no PIN.
 - **Remaining (hardware)**: confirm the terminal echoes the full 64-bit
   `auth_code` in the CDR and emits a CDR for an approved call that never
-  connects. Not covered by the live run: the real `mm_manager` DLOG loop
+  connects. Checklist: `docs/cardman-compat/HARDWARE_TEST_PLAN.md`. Not covered by the live run: the real `mm_manager` DLOG loop
   (the driver calls the same glue and accounting functions, after
   framing).
 
