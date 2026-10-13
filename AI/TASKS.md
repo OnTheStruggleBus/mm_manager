@@ -98,7 +98,7 @@ the T16 reference bridge done in `tools/`; all other cards not started.
 ### T11. Rate-table generator (G8) - superseded by T14
 - Folded into T14, which covers the full sync pipeline.
 
-### T13. Complete the CAUT/CDRI payload (G14) - **done, live run pending**
+### T13. Complete the CAUT/CDRI payload (G14) - **done, live-proven; hardware checks open**
 - **Done**: `src/mm_cardman.[ch]` (new glue), `src/mm_cardman_bridge.[ch]`,
   call sites in `src/mm_manager.c`. `/authorize` sends `seq_num`, a
   `requested_at` stable per `(terminal, seq)` for 600 s, `call_type`,
@@ -108,9 +108,22 @@ the T16 reference bridge done in `tools/`; all other cards not started.
   `mm-<terminal>-<seq>-<start_ts>` (UTC). `auth_code` is base-36, not hex.
 - **Tests**: `mm_cardman_test` (ctest), `mm_cardman_drive` +
   `tools/test_cardman_bridge.py` (mock CARDMAN).
-- **Remaining**: `tools/cardman_live_test.sh` against a CARDMAN 2.5.0.1
-  dev container; on hardware, confirm the terminal echoes the full 64-bit
-  `auth_code` and emits a CDR for an approved call that never connects.
+- **Live run (2026-10-13)**: `tools/cardman_live_test.sh` passes (27
+  checks, 5 consecutive runs) against a CARDMAN 2.5.0.1 dev container
+  (MCardSys `v2.5.0.1`, `90bcb47`, BRICKS 3.4.1), with the fork glue
+  driven by `mm_cardman_drive` and `tools/cardman_bridge.py`: answered
+  call `CAPTURED`; unanswered `RELEASED`; retries keep the `auth_code`
+  and place no hold, resent CDRs `DUPLICATE`; 7-digit dial rated as
+  NPA 212; international dial gets an `INTL` hold; `approved_limited`
+  and a wrong PIN are invalid; journal actors `platform:mm-dev` /
+  `mediation:mm-dev`; `cdr` row `source`/`switch_id`/`ani`/
+  `reported_charge_cents`; terminal-local start time (off UTC) arrives as
+  UTC `start_ts`; TAUTH/TCDR hold only the masked PAN, no PIN.
+- **Remaining (hardware)**: confirm the terminal echoes the full 64-bit
+  `auth_code` in the CDR and emits a CDR for an approved call that never
+  connects. Not covered by the live run: the real `mm_manager` DLOG loop
+  (the driver calls the same glue and accounting functions, after
+  framing).
 
 ### T14. Load terminal rate tables from CARDMAN (objective O1)
 - **Goal**: scheduled sync from `GET /api/rates` to per-terminal rate,
@@ -138,10 +151,14 @@ the T16 reference bridge done in `tools/`; all other cards not started.
 - **Done when**: contract tests fail on any field rename/removal on
   either hop; every CAUT disposition and CDRI state has a test.
 
-### T16. Bridge for CARDMAN 2.5.0.1 - **reference done here; port needs owner approval**
+### T16. Bridge for CARDMAN 2.5.0.1 - **reference live-proven here; port needs owner approval**
 - **Reference**: `tools/cardman_bridge.py`, tested by
   `tools/test_cardman_bridge.py`; contract in
-  `docs/cardman-compat/BRIDGE_CONTRACT.md` section 3.
+  `docs/cardman-compat/BRIDGE_CONTRACT.md` section 3. Live-proven against
+  CARDMAN 2.5.0.1 on 2026-10-13 (`tools/cardman_live_test.sh`, see T13);
+  no bridge change was needed. The mock's CAUT/CDRI shapes match the live
+  ones for approve, `declined` (wrong PIN), `bad_card`, missing
+  `requested_at` (400), `UNMATCHED`, and missing `charge_cents` (400).
 - **Port tasks for `OnTheStruggleBus/-mm-cardman-integration`
   `bridge/cardman_bridge.py`** (do not start without the owner's go-ahead):
   1. Identity: group `payphone`, cert CN = Basic-Auth userid = `mm-<env>`;

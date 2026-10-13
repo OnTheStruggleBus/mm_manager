@@ -187,8 +187,12 @@ integration repo's SOW phases.
 
 Fixes from [`CARDMAN_2.5_ALIGNMENT.md`](CARDMAN_2.5_ALIGNMENT.md), to the
 contract in [`BRIDGE_CONTRACT.md`](BRIDGE_CONTRACT.md). Status: fork side
-(T13) and reference bridge done on branch `claude/relaxed-mccarthy-swgc9b`;
-live run pending (`tools/cardman_live_test.sh`).
+(T13) and reference bridge done on branch `claude/relaxed-mccarthy-swgc9b`,
+and **live-proven** on 2026-10-13: `tools/cardman_live_test.sh` passes
+against a CARDMAN 2.5.0.1 dev container (MCardSys `v2.5.0.1`, `90bcb47`)
+after CARDMAN's own `scripts/verify-payphone.sh` passed. Every acceptance
+item below is covered by that run except the hardware checks (BRIDGE_CONTRACT
+section 4) and the port of the bridge to the integration repo (T16).
 Item 1 blocks every real authorization, so this phase must land before
 any live CARDMAN test (P5).
 
