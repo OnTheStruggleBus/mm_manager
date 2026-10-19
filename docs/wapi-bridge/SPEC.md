@@ -219,9 +219,9 @@ A new, separate service. Owns:
 It never sees card data and never talks to the card plane except by
 reading the bridge's masked event spool.
 
-Implementation language is decision DW-6 (recommendation: Python
-stdlib, because the table encoders it must reuse, `generate_*.py`,
-are Python, and the reference bridge is Python stdlib).
+Implementation language: Python stdlib (decision DW-6), because
+the table encoders it must reuse, `generate_*.py`,
+are Python, and the reference bridge is Python stdlib.
 
 ### 3.4 Table store
 
@@ -330,7 +330,7 @@ Rules (all enforced on write; any failure rejects the whole set with
 | `blank_before` | boolean; sets `0x40`. |
 | `spare` | not exposed; always 0. |
 
-**Content policy** (decision DW-4, recommended defaults):
+**Content policy** (decision DW-4: flag, decided 2026-10-18):
 
 - A set is flagged if any of these match, and then needs approval by a
   user holding the `rates.approve` or `adverts.approve` role even in
@@ -384,7 +384,7 @@ inter-LATA, international, ...), not by payment method. The terminal
 uses the same entries to collect coins and to compute the
 `call_cost` it reports on a card CDR. CARDMAN's tariff is a card tariff.
 So "load CARDMAN rates into the terminal" also reprices coin calls.
-That is decision **DW-1**; this spec does not let a CARDMAN import
+That is decision **DW-1**, decided (b): the terminal table stays the coin price list and CARDMAN rates only feed a drift report until H-W3 says otherwise; this spec does not let a CARDMAN import
 change coin pricing without a human approving that exact diff (§6.4).
 
 ### 6.2 Resource: `rate_plan`
@@ -762,7 +762,7 @@ The full threat list and how each item is handled is
 
 | Phase | Content | Depends on |
 |---|---|---|
-| W0 | Owner decisions DW-1 to DW-6; hardware checks H-W1 to H-W6 added to `HARDWARE_TEST_PLAN.md` | - |
+| W0 | Owner decisions DW-1 to DW-6 (done 2026-10-18, see the ADR); hardware checks H-W1 to H-W6 added to `HARDWARE_TEST_PLAN.md` | - |
 | W1 | Production `mm-bridge` (T16 port + §3.2 additions), masked spool. The allow-list file is hand-maintained until W2 writes it. | T16 owner approval |
 | W2 | `mm-termcfg` core: store, audit, identities, advert sets, deployments, F1 receipts | W0 |
 | W3 | Rate plans: manual and `operator_file` import, compile, F3 local `0x3f` answers | W2, DW-1 |

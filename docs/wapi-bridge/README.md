@@ -7,7 +7,7 @@ here is built yet.
 
 | File | What it covers |
 |---|---|
-| [`ADR-0001-WAPI-BRIDGE.md`](ADR-0001-WAPI-BRIDGE.md) | The decisions (W1-W10), the owner decisions still open (DW-1 to DW-6), consequences. Start here. |
+| [`ADR-0001-WAPI-BRIDGE.md`](ADR-0001-WAPI-BRIDGE.md) | The decisions (W1-W10), the owner decisions DW-1 to DW-6 (decided 2026-10-18), consequences. Start here. |
 | [`SPEC.md`](SPEC.md) | Components, card plane and config plane APIs, advert and rate-table rules, staging and delivery, events, BRICKS/CARDMAN constraints and requests (R9-R12), phasing, acceptance, hardware checks, and inventories of every CARDMAN route and DLOG message considered. |
 | [`VOCABULARY.md`](VOCABULARY.md) | Payphone Interchange Vocabulary (PIV) v1: field dictionary mapped to CARDMAN, DLOG and the bridge hop; sensitivity classes; CloudEvents envelope; enumerations; error envelope; versioning. |
 | [`ADVERSARIAL_REVIEW.md`](ADVERSARIAL_REVIEW.md) | Red-team findings against the first draft (author's own pass, then an independent pass) and what changed because of them. |

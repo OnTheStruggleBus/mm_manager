@@ -1,6 +1,6 @@
 # ADR-0001: WAPI bridge, terminal configuration API, and a shared vocabulary
 
-- **Status**: Proposed, 2026-10-18. Owner decisions DW-1 to DW-6 are open.
+- **Status**: Proposed, 2026-10-18. Owner decisions DW-1 to DW-6 recorded 2026-10-18.
   Independently reviewed 2026-10-18 (`ADVERSARIAL_REVIEW.md`, second
   section); its fixes are in.
 - **Scope**: this fork (`OnTheStruggleBus/mm_manager`) and the processes
@@ -130,16 +130,18 @@ protocol loop.
 bridge hop's wire format.** The bridge hop gains only an optional
 `piv_version` marker and a `GET /healthz`.
 
-## Owner decisions needed
+## Owner decisions (recorded 2026-10-18)
 
-| # | Decision | Options | Recommendation |
+All six were decided by the owner on 2026-10-18, each as recommended.
+
+| # | Decision | Options considered | Decided |
 |---|---|---|---|
-| DW-1 | Coin vs card pricing share one RATE table | (a) one price list for both, CARDMAN tariff set to match coin prices; (b) terminal table stays coin-authored, CARDMAN import used only to report drift; (c) find a terminal mechanism to separate them (none known) | **(b) now**, move to (a) if the owner wants card and coin prices identical. Confirm with H-W3 first. |
-| DW-2 | How `mm-termcfg` gets CARDMAN tariff data | `operator_file`; `ratesync` identity (R9); wait for `QUOT`; `mediation` | **`operator_file` now, R9 next, `QUOT` when built. Never `mediation`.** |
-| DW-3 | Approval rule | two-person; single-operator with recorded self-approval | Two-person where there are two operators; single-operator mode otherwise, always marked in audit and events. |
-| DW-4 | Advert content policy | none; flag digit runs and prices; forbid them | **Flag** (approval reason required). |
-| DW-5 | Enable F2 (download on routine call-in) | on, off | Off until H-W1 passes. |
-| DW-6 | `mm-termcfg` implementation language | Python stdlib; Go | **Python stdlib** (reuses `generate_*.py` encoders; matches the reference bridge). |
+| DW-1 | Coin vs card pricing share one RATE table | (a) one price list for both; (b) terminal table stays coin-authored, CARDMAN import only reports drift; (c) separate them on the terminal (no mechanism known) | **(b)**. The terminal rate table stays the coin price list; CARDMAN rates are imported only to report how far card billing differs. Revisit (a) after hardware check H-W3. |
+| DW-2 | How `mm-termcfg` gets CARDMAN tariff data | `operator_file`; `ratesync` identity (R9); wait for `QUOT`; `mediation` | **`operator_file` now, request R9 next, `QUOT` when CARDMAN 2.6 ships it. Never `mediation`.** |
+| DW-3 | Approval rule | two-person; single-operator with recorded self-approval | **Single-operator** with a typed reason, marked `self_approved` in audit and events. Switch to two-person when a second operator exists. |
+| DW-4 | Advert content policy | none; flag digit runs and prices; forbid them | **Flag**: 7+ digits or a `$` amount needs an approval reason. |
+| DW-5 | F2 (download on routine call-in) | build, off until tested; don't build; on by default | **Build it behind a flag, default off**; enable only after H-W1 and H-W5 pass. |
+| DW-6 | `mm-termcfg` implementation language | Python stdlib; Go | **Python stdlib**. |
 
 ## Consequences
 
