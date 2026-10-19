@@ -42,7 +42,7 @@ can change this file.
       number uses `mask_pan()`.
 - [ ] No variable holding a PIN reaches any output.
 - [ ] Every error path in authorization ends in a decline, including a
-      malformed `auth_code` (must be exactly 8 hex chars).
+      malformed `auth_code` (must be exactly 8 chars of `[0-9A-Z]`, base-36, not hex).
 - [ ] Buffers are bounded (`snprintf`, size checks); input fields are
       validated as digits before being placed in JSON.
 - [ ] Tests cover the approve, decline, and failure paths.

@@ -124,7 +124,7 @@ by coincidence.
    `docs/api/API_CONTRACTS.md` and `ratesrv.rexx` by commit.
 2. **Strict validation both ways.** Requests: digits-only PAN (16),
    PIN (4), called number; `seq_num`, `requested_at` present.
-   Responses: `auth_code` exactly 8 hex chars, fully consumed (G15);
+   Responses: `auth_code` exactly 8 chars of `[0-9A-Z]` (base-36, not hex), fully consumed (G15);
    unknown or missing fields -> decline (auth) or retry (CDR).
 3. **Error mapping table.** Every CAUT disposition and CDRI state/code
    (`BAD_REQUEST`, `INTERNAL`, `NO_TARIFF`, `RATE_LIMITED`, HTTP 403/429,
