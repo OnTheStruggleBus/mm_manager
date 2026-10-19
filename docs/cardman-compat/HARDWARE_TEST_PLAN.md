@@ -48,7 +48,10 @@ T10, T13, T7.
    (`2>&1`): the CARDMAN glue logs its failures on stderr.
 5. Two or three fresh test cards, each with its PIN, and a note of the
    terminal's line number (it is the `terminal_id`, `switch_id` and
-   `ani` in CARDMAN).
+   `ani` in CARDMAN). **Blocked as of 2026-10-19:** `NEWC` issues the
+   number and PIN, but there is no way yet to put the number on a card
+   the terminal can read. Options are listed in
+   [`../wapi-bridge/SPEC.md`](../wapi-bridge/SPEC.md) §14.1.
 
 **Evidence for every test:** the `auth_code` (from `bridge.log`, line
 `authorize: ... auth_code=XXXXXXXX`), the matching lines in
