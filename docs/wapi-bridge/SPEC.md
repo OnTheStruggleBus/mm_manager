@@ -102,11 +102,11 @@ sites, new logic in new `mm_termcfg*.c` files per `AI/REPO_GUIDE.md`
 
 | # | Change | Why | Verified? |
 |---|---|---|---|
-| F1 | Write a **delivery receipt** when `DLOG_MT_TABLE_UPD_ACK` arrives: `(terminal_id, table_id, sha256 of the bytes actually sent, ack time UTC)`, appended to `tables/<tid>/delivery.log` (one JSON object per line). At session end, also write `tables/<tid>/terminal.json` (terminal model, MTR version, last session time UTC, no card data). | The config plane must report `delivered`, not guess it. Today the ACK is only printed (`process_mm_table()`, `case DLOG_MT_TABLE_UPD_ACK`). `terminal.json` gives `mm-termcfg` its inventory without opening mm_manager's database, which holds masked PANs (review A-18). | Design only. |
+| F1 | Write a **delivery receipt** when a table sent by `mm_download_tables()` is ACKed, that is when `wait_for_table_ack()` (`src/mm_proto.c`) returns 0 for it: `(terminal_id, table_id, sha256 of the file bytes as loaded, before any in-memory patch, the path the file was resolved from, ack time UTC)`, appended to `tables/<tid>/delivery.log` (one JSON object per line). A failed ACK writes a `failed` line, not a receipt. At session end, also write `tables/<tid>/terminal.json` (terminal model, MTR version, last session time UTC, no card data). | The config plane must report `delivered`, not guess it. During a manager-pushed download the ACKs are consumed by `wait_for_table_ack()`, whose return value `mm_download_tables()` ignores; the `case DLOG_MT_TABLE_UPD_ACK` in `process_mm_table()` only sees ACKs outside a download, so a hook there would never fire (independent review I-1). The hash is of the file, not of the sent buffer, because mm_manager patches some buffers after loading (`DLOG_MT_FCONFIG_OPTS` `term_type`, `DLOG_MT_CALL_SCREEN_LIST` padding). `terminal.json` gives `mm-termcfg` its inventory without opening mm_manager's database, which holds masked PANs (review A-18). | Design only. |
 | F2 | On `DLOG_MT_CALL_IN`, if `tables/<tid>/pending` exists, send **only** the managed tables whose staged sha256 differs from the last F1 receipt for that table, then `END_DATA` (the upstream download lines are present but commented out in `case DLOG_MT_CALL_IN`). Pending is decided by hash, never by mtime. Behind a run-time flag, default off. | A routine scheduled call-in does **not** download tables today. Only `DLOG_MT_ATN_REQ_TAB_UPD` (craft force, install, lost memory, power lost on download) does. Without F2, a staged change waits for a technician. Sending only changed tables keeps the payphone's line busy for less time (A-17); hashes survive host clock steps that break `check_mm_table_is_newer()`'s mtime compare (A-16). | **Unverified on hardware (H-W1).** Upstream commented it out; the reason is unknown. |
-| F3 | Answer `DLOG_MT_RATE_REQUEST` (`0x3f`) from a compiled local lookup file written by `mm-termcfg`, instead of the hard-coded 240 s / 100 c / 60 s / 25 c. File read only; no network in the protocol loop. Missing or invalid file -> today's behaviour plus a warning. | Otherwise the terminal is told a price that contradicts the published rate plan. | Design only; which calls trigger `0x3f` is unverified (H-W4). |
+| F3 | Answer `DLOG_MT_RATE_REQUEST` (`0x3f`) from a compiled local lookup file written by `mm-termcfg`, instead of the hard-coded 240 s / 100 c / 60 s / 25 c. One lookup file per published plan version, named by the hash of the RATE table it was compiled with; mm_manager uses the one whose hash matches this terminal's last F1 receipt for `0x49`, never simply the newest. File read only; no network in the protocol loop. No receipt, or a missing or invalid file -> today's behaviour plus a warning. | Otherwise the terminal is told a price that contradicts the RATE table it actually holds. A plan is staged long before it is delivered (until H-W1, until a technician visits), so answering from the newest plan would quote new prices on a terminal still running old ones (independent review I-7). | Design only; which calls trigger `0x3f` is unverified (H-W4). |
 | F4 | Accept `-t`/`-d` pointing at the shared table store for every line process (already supported) and document it as required. | One writer (`mm-termcfg`), many readers (one mm_manager per line, `ARCHITECTURE_ANALYSIS.md` G12). | Existing behaviour. |
-| F5 | Hold an exclusive `flock` on `tables/<tid>/.lock` and a shared `flock` on `tables/.lock` for the whole of any table download. Wait at most 5 s for them; if not acquired, skip the download this session and log it. | Without it, a deployment staged mid-download can send old RATE with new NPA-NXX tables (RATE is sent first), pointing callers at the wrong prices (review A-10). | Design only. |
+| F5 | Hold an exclusive `flock` on `tables/<tid>/.lock` and a shared `flock` on `tables/.lock` for the whole of any table download. Take them **before** the reply that announces the download (`DLOG_MT_TABLE_UPD` is sent by `process_mm_table()` before `mm_download_tables()` runs). Wait at most 5 s; if not acquired, skip the download this session and log it, except when the terminal's reason includes lost memory or power lost on download, where it waits up to 60 s (a terminal without tables is out of service). Once a managed rate table (`0x49`, `0x96`, `0x97`, LCD/NPA) fails its ACK, send no further managed rate tables in that session. | Without the lock, a deployment staged mid-download can send old RATE with new NPA-NXX tables (RATE is sent first), pointing callers at the wrong prices (review A-10). Today a failed ACK does not stop the loop, so a NACKed RATE can be followed by ACKed prefix tables (independent review I-2). | Design only; how the terminal handles a download cut short is H-W5. |
 
 The card path (`src/mm_cardman.c`, `src/mm_cardman_bridge.c`) is not
 changed by this spec.
@@ -128,14 +128,23 @@ checklist is `AI/TASKS.md` T16. This spec adds:
    `{"ok":true,"piv_version":"1","cardman_reachable":<bool>,"last_caut_ok_ts":"...","last_cdri_ok_ts":"..."}`.
    No card data, no counts by card. `cardman_reachable` comes from the
    last real call's outcome; the bridge does not probe CARDMAN with
-   synthetic money calls.
+   synthetic money calls. If that outcome is older than 15 minutes,
+   `cardman_reachable` is `null` (unknown), not the stale value
+   (independent review I-21).
 4. **Masked event spool**: after each CAUT/CDRI exchange, append one
    event ([`VOCABULARY.md`](VOCABULARY.md) §5) to a local spool directory
-   with no S3 field (no PAN, no PIN) and S2 fields only in masked form.
-   The card is identified by `card_ref` (HMAC-SHA256 of the PAN under a
-   key only the bridge holds, truncated to 16 hex; the bridge already
-   keeps `HMAC(card)` for its `requested_at` cache), so subscribers can
-   correlate calls without a cardholder-trackable `masked_pan` (A-3).
+   with no S3 field (no PAN, no PIN, no `dial_id`) and S2 fields only in
+   masked form. The card is identified by `card_ref` (HMAC-SHA256 of the
+   PAN under a key held only in the bridge's memory, truncated to 16
+   hex). The key is random at start and rotated every 24 h; it is never
+   written to disk, because anyone holding it can recover a PAN from a
+   `card_ref` by enumerating the roughly 10^7 PANs of one telco.
+   `card_ref` is S2, like `masked_pan`: a stable per-card pseudonym with
+   terminal and time is the same cardholder trail A-3 was about
+   (independent review I-4). The relay passes it only to
+   `events.sensitive` subscribers, and re-keys it per subscription
+   (`HMAC(subscription_secret, card_ref)`), so two subscribers cannot join
+   their data on it.
    Spool directory mode 0750, files 0640, owner the bridge user, group
    the relay; every event is checked against the vocabulary schema
    before it is written. The bridge never sends events anywhere itself;
@@ -159,15 +168,35 @@ checklist is `AI/TASKS.md` T16. This spec adds:
    automatically from a call-in or `terminal.json`, so an emulator cannot
    enroll itself. `terminal_id` is still only a claim; the list stops
    casual emulators, not one who knows a real line number.
-8. **Attempt limits**: per terminal, more than 5 `invalid` verdicts in
-   10 minutes, and fleet-wide more than 60 in 10 minutes, make the
-   bridge answer `invalid` locally, without calling CARDMAN, until the
-   window passes (defaults; configurable). *Why*: `payphone` is exempt
-   from CARDMAN rate limiting (ADR 18) and telco-global (ADR 38), and
-   three wrong PINs lock a card, so a DLOG emulator dialing in could lock
-   customers' cards at line rate (review A-1). A tripped limit raises an
-   event and is visible in `/healthz` as a count, never with card data.
-   CDRs are never limited.
+8. **Attempt limits** (defaults; configurable). *Why*: `payphone` is
+   exempt from CARDMAN rate limiting (ADR 18) and telco-global (ADR 38),
+   and three consecutive wrong PINs lock a card (`pin_fails`), so a DLOG
+   emulator dialing in could lock customers' cards at line rate (review
+   A-1). Three limits, each answering `invalid` locally without calling
+   CARDMAN:
+   - **Per card**: after 2 consecutive `invalid` verdicts for one card
+     (keyed by the in-memory card HMAC), further attempts for that card
+     are refused for 24 h or until the bridge restarts. This keeps the
+     payphone path from delivering a card's third strike by itself, which
+     the per-terminal and fleet limits cannot do: at 60 per 10 minutes
+     they still let an attacker lock 20 cards every 10 minutes
+     (independent review I-6). A legitimate caller who mistypes twice
+     waits; that is cheaper than a locked card.
+   - **Per terminal**: more than 5 `invalid` in 10 minutes refuses that
+     `terminal_id` until the window passes.
+   - **Fleet**: more than 60 `invalid` in 10 minutes raises an alert
+     event and drops the per-terminal limit to 1 for the next hour. It
+     never refuses the whole fleet: terminal ids are printed on the
+     payphones, so a fleet-wide refusal would let anyone stop every
+     card call with 61 attempts.
+   A limit refuses a spoofed `terminal_id` and the real terminal alike;
+   the per-terminal limit is therefore also a way to deny one payphone's
+   card service. H-W6 checks whether mm_manager can read the calling
+   line's caller ID from the modem and refuse sessions whose claimed
+   `terminal_id` disagrees. Caller ID can be forged on some networks, but
+   it is harder to forge than a field the emulator fills in itself. A tripped limit raises an event and is
+   visible in `/healthz` as a count, never with card data. CDRs are
+   never limited.
 
 Everything else (dispositions, release CDRs, number normalization,
 retries, `requested_at` cache, timeouts) is exactly T16 / `BRIDGE_CONTRACT.md` §3.
@@ -210,9 +239,34 @@ The directories mm_manager already reads (`load_mm_table()`,
 | `tables/<terminal_id>/terminal.json` | new, F1; written by mm_manager at session end |
 | `tables/<terminal_id>/.lock`, `tables/.lock` | new, F5; download and staging locks |
 
-`mm-termcfg` is the **only writer** of `.bin` files. Hand edits and the
-`generate_*.py` scripts run directly against a managed store are
-unsupported once `mm-termcfg` manages it (it detects them by hash, §7.4).
+`mm-termcfg` is the **only writer** of the **managed** `.bin` files, and
+may write no others. Managed tables are exactly: `0x1d` (adverts),
+`0x49` (RATE), `0x96`, `0x97`, and the LCD / NPA-NXX ids in §6.1. The
+compiler refuses any other table id. Every other table stays owned by
+the operator account that installs mm_manager, because several of them
+control the card path: the card table `0x16` carries per-range
+`vfy_flags` (`src/mm_card.h`) such as `CARD_VF_NCCVAL_IND` (whether the
+terminal asks the manager to validate a card at all),
+`CARD_VF_PROMPT_FOR_PIN` and `CARD_VF_ACCS_ROUTING`. A config plane that
+could rewrite `0x16` could let card calls through with no `CAUT` and no
+hold, which W1 says a config bug must never be able to do (independent
+review I-3). Enforcement is on disk, not only in code: table
+directories are sticky (`chmod +t`), unmanaged files are owned by the
+operator account, so `mm-termcfg` cannot rename over them, and the drift
+sweep (§7.4) also hashes unmanaged files and raises
+`config.table.drift` when one changes.
+
+mm_manager resolves each table per terminal in this order:
+`tables/<terminal_id>/`, then the model profile directory under `-t`,
+then `-d` (`load_mm_table()`). A file at a more specific level
+**shadows** a deployment to a less specific one. Deployments compute the
+effective file per terminal with the same order and report a shadowed
+table as `shadowed`, naming the file that wins, instead of leaving it
+`staged` forever (independent review I-13).
+
+Hand edits and the `generate_*.py` scripts run directly against a
+managed store are unsupported once `mm-termcfg` manages it (it detects
+them by hash, §7.4).
 
 ## 4. Card plane API
 
@@ -228,9 +282,13 @@ and risks a field mismatch on the money path).
 
 DLOG table `0x1d` `DLOG_MT_ADVERT_PROMPTS` (`src/mm_manager.h`
 `dlog_mt_advert_prompts_t`): 20 entries of `admess_table_entry_t`, 24
-bytes each; the file is 480 bytes (the table without its id byte;
-`generate_advert_prompts.py` checks the size, `mm_admess` validates it
-with `mm_validate_table_fsize()`).
+bytes each; the file is 480 bytes (the table without its id byte).
+`generate_advert_prompts.py` does not enforce this: it writes the file
+first and only prints a warning if the size is wrong, and it writes text
+longer than 20 characters as is, so an oversized table reaches disk
+(independent review I-20). `mm_admess` validates the size with
+`mm_validate_table_fsize()`. The `mm-termcfg` compiler reuses the
+script's byte layout but enforces every size and length itself (§5.2).
 
 | Wire field | Size | Meaning |
 |---|---|---|
@@ -274,15 +332,29 @@ Rules (all enforced on write; any failure rejects the whole set with
 
 **Content policy** (decision DW-4, recommended defaults):
 
-- A slot whose text contains 7 or more digits (after removing spaces,
-  dashes, dots and parentheses), or a `$` amount, needs approval by a
+- A set is flagged if any of these match, and then needs approval by a
   user holding the `rates.approve` or `adverts.approve` role even in
-  single-operator mode, and the approval records the reason. A payphone
-  display is a trusted surface to callers; a phone number or price on it
-  is the shape of a toll-fraud or phishing message.
+  single-operator mode, with the reason recorded. A payphone display is
+  a trusted surface to callers; a phone number or price on it is the
+  shape of a toll-fraud or phishing message.
+  - **Number**: 7 or more digits after removing spaces, dashes, dots and
+    parentheses, checked on each slot **and** on the concatenation of
+    each hook state's slots in display order (1-10, 11-20), so a number
+    split across slots is caught. Letters next to digits count as
+    keypad digits for this check (`1-800-CALL-NOW`).
+  - **Price**: a `$` amount, or digits followed by `c`, `ct`, `cent` or
+    `cents` (the stock `config/advert_prompts.csv` says `50-cents` and
+    `$1.00 for 4-minutes`), or `free`.
+  (independent review I-9)
 - Prices in adverts are not cross-checked against the rate plan
   automatically in phase 1; the preview shows the current published rate
-  plan next to the advert so the approver can.
+  plan next to the advert so the approver can. The reverse also holds: a
+  rate plan's approval and deployment preview list every slot flagged
+  **Price** in the advert sets in effect on the target terminals
+  (including the `-d` default set), and the approval body must
+  acknowledge them. A rate change can make an advert already on the
+  terminal false, without anyone touching the advert (independent
+  review I-8).
 
 ### 5.3 Compile and preview
 
@@ -299,7 +371,7 @@ plain-text rendering of both hook states.
 | Table | Id | Shape (`src/mm_manager.h`) |
 |---|---|---|
 | RATE | `0x49` | header (timestamp, `telco_id` `uint8`, 32 spare bytes) + 128 entries of `{type, initial_period, initial_charge, additional_period, additional_charge}`; file 1191 bytes. `FLAG_PERIOD_UNLIMITED` is bit 15 of a period. |
-| INTL SBR | `0x97` | country code -> flags; flags 2-63 point at RATE entry `flags + 28` (`IXL_TO_RATE`), 0 = NCC rated, 1 = blocked. |
+| INTL SBR | `0x97` | country code -> flags; flags 2-63 point at RATE entry `flags + 28` (`IXL_TO_RATE`), so RATE entries 30-91; 0 = NCC rated, 1 = blocked. The header's `default_rate_index` uses the same encoding (`src/mm_rateint.c`). |
 | NPA-NXX / LCD | `0x4a`-`0x51`, `0x5a`/`0x5b`, `0x65`-`0x73`, `0x88`-`0x95`, `0xa0`/`0xa1`, NPA SBR `0x96` | map dialed prefixes to a rate type / entry; built today by `generate_lcd*.py`, `generate_npa.py`. |
 
 Units, from upstream's non-test `DLOG_MT_RATE_REQUEST` answer
@@ -330,7 +402,8 @@ A rate plan is the terminal price list in the vocabulary's terms
      "initial_period_secs": 240, "initial_charge_cents": 100,
      "additional_period_secs": 60, "additional_charge_cents": 25}
   ],
-  "intl": {"default_rate_index": 0, "countries": [{"country_code": 44, "rate_index": 30}]},
+  "intl": {"default": "ncc_rated", "countries": [{"country_code": 44, "rate_index": 30},
+                                                 {"country_code": 850, "rate_index": "blocked"}]},
   "prefix_map_ref": "lcd-nyc-2026q4",
   "source": {"kind": "manual|cardman_rates|cardman_quote|operator_file",
              "fetched_ts": "...", "source_digest": "<sha256 of the source list>"},
@@ -341,10 +414,29 @@ A rate plan is the terminal price list in the vocabulary's terms
 Validation: `index` 0-127 and unique; periods 1-32767 or the unlimited
 flag; charges 0-65535; `dlog_rate_type` from `rate_type_t` (excluding
 `not_available`, which upstream marks "not used in RATE table"); INTL
-`rate_index` only 28-91 (flags 2-63 + offset 28). Index layout beyond
+`rate_index` and `default` are each `"ncc_rated"`, `"blocked"`, or a
+RATE index 30-91 (flags 2-63 + offset 28). The first draft said 28-91;
+28 and 29 would compile to flags 0 and 1, silently turning a priced
+country into "NCC rated" or "blocked", and its example's
+`default_rate_index: 0` meant NCC rated, not RATE entry 0 (independent
+review I-10). Index layout beyond
 that (which index each LCD/NPA table points at) must match the
 existing generators; the compiler refuses a plan whose prefix map points
 at an index the plan does not define.
+
+**Index stability** (independent review I-2). A terminal can end up
+holding RATE from one plan version and prefix tables from another even
+with the F5 lock: a line drop or a failed ACK part way through a
+download leaves whatever was already ACKed, and RATE is sent first.
+So a new version may change the **prices** at an index, but may not
+change which kind of call an index means while the previous published
+version's prefix map points at it. Re-pointing is done in two
+deployments: first add the new indexes (old prefix map, new RATE), wait
+until every target terminal has a receipt, then switch the prefix map.
+The compiler checks this against the version currently published to
+each target and refuses otherwise. Any mix of two adjacent versions is
+then priced by one version or the other, never by an index that means
+something else.
 
 The prefix map (LCD/NPA tables) is a separate versioned artifact built
 from the existing generators' inputs (rate centers, NPA lists). Phase 1
@@ -357,7 +449,7 @@ treats it as an operator-supplied input and only checks references.
 | `manual` | operator enters or uploads entries | now | config-plane role only |
 | `operator_file` | an admin runs `GET /api/rates` from their own workstation with their own `admin` identity and uploads the JSON; `mm-termcfg` validates it as if it had fetched it, and records the source as `operator_attested` with the uploader's identity (CARDMAN does not sign responses, so the file's origin cannot be proven; review A-19) | now (CARDMAN 2.5.0.1) | none held by the payphone host |
 | `cardman_rates` | `mm-termcfg` pulls `GET /api/rates` on a schedule | only after CARDMAN grants a **read-only** identity (request R9, §10.2) | dedicated `ratesync` identity, never `mediation` on this host |
-| `cardman_quote` | `mm-termcfg` samples CARDMAN 2.6 `POST /api/rates/quote` (`QUOT`) over a destination x period x duration matrix | CARDMAN 2.6 (proposed, not built) | `payphone`-group read grant as proposed in CARDMAN's TODO, or `ratesync` |
+| `cardman_quote` | `mm-termcfg` samples CARDMAN 2.6 `POST /api/rates/quote` (`QUOT`) over a destination x period x duration matrix | CARDMAN 2.6 (proposed, not built) | `ratesync` only (R10). Never the `payphone` identity, although CARDMAN's proposed `QUOT` ACL is `payphone,mediation,admin`: W1 gives the planes no shared credential, and `payphone` also grants `CAUT` and `CDRI` (independent review I-15). |
 
 Why not `mediation` (the only group that can read `/api/rates` today
 besides `admin`): it also grants `CDRI`. A leaked `mediation` credential
@@ -378,18 +470,34 @@ has two blocks, CARDMAN rows have three plus fees. So the mapping is
 lossy and the plan records how lossy:
 
 1. **Select** rows for the plan's `telco_id` (config: CARDMAN
-   `telco_id` -> plan). Reject the import if two rows share
-   `(telco_id, call_type, carrier)` (they differ by band or period,
-   which the response cannot show): `AMBIGUOUS_SOURCE`, human must pick.
+   `telco_id` -> plan). The response is every telco's rows, with no
+   scoping, and includes `*` rows (CAUT's `no_tariff` rule names the
+   universal `'*'/'*'/'*'` row). For each `call_type`, use the plan's
+   telco's rows if there are any, else the `*` telco's rows; never mix
+   the two for one `call_type`. (This is how CAUT's `no_tariff` rule
+   reads; the exact tie-break inside CARDMAN's rater is not in the
+   contracts, which is one more reason the label stays `approximate`.) Reject the
+   import if two rows share `(telco_id, call_type, carrier)` (they
+   differ by band or period, which the response cannot show):
+   `AMBIGUOUS_SOURCE`, human must pick. If several **carrier** rows
+   apply to one `call_type`, the terminal cannot tell carriers apart:
+   take the highest price per block across them and flag the entry
+   `lossy:true` (independent review I-12).
 2. **Map** `call_type` to terminal rate types with an operator-owned
    table (default: `DOM` -> `mm_local`, `mm_intra_lata`,
    `mm_inter_lata`; `INTL` -> international entries; `TOLLFREE` -> none,
    since the terminal does not charge 1-800 calls).
 3. **Blocks**: `initial_* -> initial_*`; `addl_* -> additional_*`. If
    `second_*` differs from `addl_*`, the second block cannot be shown.
-   Default rule **never understate**: fold the second block in by
-   raising `initial_charge` to cover it over the initial period, and flag
-   the entry `lossy:true`. (Overstating overcharges coin callers if DW-1
+   Default rule **never understate**: fold the second block into the
+   first, `initial_period = initial_secs + second_secs` and
+   `initial_charge = initial_cents + second_cents`, and flag the entry
+   `lossy:true`. This overstates calls shorter than `initial_secs`. The
+   first draft raised `initial_charge` but kept `initial_period =
+   initial_secs`, which bills the second block's time at the `addl`
+   rate and so understates whenever `second` is dearer than `addl`
+   (independent review I-11). A fold that would pass 32767 s or 65535 c
+   is rejected. (Overstating overcharges coin callers if DW-1
    applies the plan to coin calls; that is why every import is a diff a
    human approves, not an auto-publish.)
 4. **Tolerance label**: an imported plan is `exact` only if every row
@@ -398,7 +506,10 @@ lossy and the plan records how lossy:
    label is shown on every preview and carried in events.
 5. **Change detection** (from O1, corrected): compare the whole list,
    `count` plus every row's `(telco_id, call_type, carrier, version,
-   effective_ts)` in order, as `source_digest`. Never key on
+   effective_ts)`, as `source_digest`. Sort the rows by all five fields
+   before hashing: `ratesrv.rexx` orders only by `telco_id, call_type,
+   carrier`, so rows tied on those come back in no fixed order and an
+   unsorted digest would report changes that did not happen. Never key on
    `(telco_id, call_type, carrier)` alone; never parse `effective_ts` as
    seconds (minute precision on the 2.5 line); `version` orders edits.
 6. **Fail-safe**: anything but HTTP 200 with `"ok":true`, an empty body
@@ -415,8 +526,9 @@ the plan is still a draft until approved.
 ### 6.5 Real-time rate request (`0x3f`)
 
 F3 makes mm_manager answer `DLOG_MT_RATE_REQUEST` from a compiled lookup
-written alongside the RATE table at publish time: prefix -> entry. It
-is a file read; it never calls `mm-termcfg` or CARDMAN from inside the
+written alongside the RATE table at publish time: prefix -> entry, one
+file per published version, chosen per terminal by its last `0x49`
+receipt (F3). It is a file read; it never calls `mm-termcfg` or CARDMAN from inside the
 protocol loop (the session is 1200 baud and single-threaded;
 `ARCHITECTURE_ANALYSIS.md` §1).
 
@@ -437,6 +549,9 @@ protocol loop (the session is 1200 baud and single-threaded;
 }
 ```
 
+Per-table `state` is a `table_state` (`VOCABULARY.md` §4.6), including
+`shadowed` (§3.4).
+
 ### 7.2 Staging, per table file
 
 0. Take the F5 locks: exclusive `tables/<tid>/.lock` for a terminal
@@ -452,13 +567,31 @@ protocol loop (the session is 1200 baud and single-threaded;
    mm_manager reads a table at download time (`load_mm_table()`), so a
    non-atomic write can send a torn table mid-session.
 3. Keep the previous file as `mm_table_XX.bin.prev` (one-step rollback)
-   and every published version in `mm-termcfg`'s own store.
+   and every published version in `mm-termcfg`'s own store. Rollback
+   writes a **fresh copy** through step 2; it never renames `.prev` back,
+   because a renamed `.prev` keeps its old mtime and a craft force
+   download would skip it (below; independent review I-13).
 4. Touch `tables/<tid>/pending` (F2) after all files of the deployment
    for that terminal are in place, never before.
 
 `check_mm_table_is_newer()` compares the table file's mtime with
 `table_update.log`'s; a rename keeps the temp file's fresh mtime, so a
-craft force download picks the new file up.
+craft force download picks the new file up, **for terminal and default
+targets only**. That function looks at `tables/<tid>/` and then `-d`;
+it never looks at the model profile directory that `load_mm_table()`
+uses. A profile-target change is therefore skipped by a craft force
+download whenever the `-d` file is older than the terminal's last
+download, and needs a lost-memory download, mm_manager's `-c`, or F2.
+The deployment says so for profile targets instead of reporting a plain
+`staged` (independent review I-13).
+
+A default or profile target's exclusive `tables/.lock` competes with
+every line's shared lock; `flock` gives a waiting writer no
+priority, so on a busy host it could wait for ever. `mm-termcfg` writes
+`tables/.stage-intent` first; F5 makes a line that sees it wait for the
+staging to finish (within its own 5 s / 60 s bound) before taking its
+shared lock. A stage that still cannot lock within 10 minutes fails
+visibly (`failed`, reason `lock_timeout`).
 
 ### 7.3 Delivery
 
@@ -601,7 +734,7 @@ them gain any access to this host's planes by adopting it.
 | R9 | A **read-only `ratesync` group** for `GET /api/rates` only. The edits are the ones ADR 40 made for `payphone`: the `RATE` row in `web_routes.conf`; the `RATE` line's ACL in `transactions.conf` (today `mediation,admin`); the LINK targets `RATE` calls, `ACTR` and `RLIM`, so `acl-lint.sh` passes (ADR 15); a `users.conf` row and a client cert, CN = userid = `rs-<env>`. `ratesrv.rexx` stamps every caller `mediation:<CN>`, so either accept that stamp for `ratesync` or add a `ratesync:` prefix (a program change). Response bytes do not change; `RATE` keeps its `RATELIMIT` wiring (30 / 60 s). | Lets `cardman_rates` sync run without `mediation` (which grants `CDRI`) or `admin`. Smallest grant that does the job (ADR 15's rule). |
 | R10 | When `QUOT` lands (2.6), allow the `ratesync` group as well as `payphone`. | Keeps the config plane off the card-plane identity, so revoking one does not cut the other (the reason ADR 40 gave `payphone` its own group). |
 | R11 | Document that `GET /api/rates` rows are not unique on `(telco_id, call_type, carrier)` and add `distance_band`/`rate_period` to the 2.6 full-tariff export or quote. | The import must refuse ambiguous rows today (§6.4 step 1). |
-| R12 (optional) | Grant `payphone` the existing war-dial limiter `WDIA` (`POST /api/agi/channel-limit`, today `agi,gate`), with `channel_id` = `terminal_id`. | A CARDMAN-side counter per terminal, as an alternative or addition to the bridge's local limit (§3.2 item 8). Note `WDIA` fails open on counter trouble, so the bridge-local limit stays. |
+| R12 (optional) | Grant `payphone` the existing war-dial limiter `WDIA` (`POST /api/agi/channel-limit`, today `agi,gate`), with `channel_id` = `terminal_id`. The edits, as for R9: the `WDIA` row in `web_routes.conf`, the `WDIA` line in `transactions.conf`, and the ACL of `RLIM`, which `WDIA` LINKs and which does not list `payphone` today (`ACTR` already does), or `acl-lint.sh` fails (ADR 15); plus a reviewed `RATELIMIT` posture for the new caller (ADR 18). | A CARDMAN-side counter per terminal, as an alternative or addition to the bridge's local limit (§3.2 item 8). Note `WDIA` fails open on counter trouble, so the bridge-local limit stays. The first draft understated the edits, as A-13 found for R9 (independent review I-18). |
 | R6 (existing) | Quote route | Exact displayed prices. |
 | R4 (existing) | International flag on CDRI | Unchanged; affects billing, not this design. |
 
@@ -629,7 +762,7 @@ The full threat list and how each item is handled is
 
 | Phase | Content | Depends on |
 |---|---|---|
-| W0 | Owner decisions DW-1 to DW-6; hardware checks H-W1 to H-W4 added to `HARDWARE_TEST_PLAN.md` | - |
+| W0 | Owner decisions DW-1 to DW-6; hardware checks H-W1 to H-W6 added to `HARDWARE_TEST_PLAN.md` | - |
 | W1 | Production `mm-bridge` (T16 port + §3.2 additions), masked spool. The allow-list file is hand-maintained until W2 writes it. | T16 owner approval |
 | W2 | `mm-termcfg` core: store, audit, identities, advert sets, deployments, F1 receipts | W0 |
 | W3 | Rate plans: manual and `operator_file` import, compile, F3 local `0x3f` answers | W2, DW-1 |
@@ -644,11 +777,21 @@ The full threat list and how each item is handled is
   production bridge; the leak check in `AI/WORKFLOW.md` step 3 finds no
   PAN/PIN in the bridge's logs, spool or health output; a non-CARDMAN
   egress attempt is refused; an unlisted terminal and a missing
-  allow-list both decline without a CARDMAN call; the per-terminal and
-  fleet attempt limits trip at their thresholds and never limit CDRs.
+  allow-list both decline without a CARDMAN call; the per-card,
+  per-terminal and fleet attempt limits behave as §3.2 item 8 says (the
+  fleet limit never refuses the whole fleet) and never limit CDRs;
+  `card_ref` reaches only `events.sensitive` subscribers, differs
+  between two subscriptions for the same card, and changes after a key
+  rotation.
 - **Table sets**: a deployment staged while a (playback) download session
   holds the F5 lock is applied only after the session; the session sends
-  one consistent set.
+  one consistent set. A download cut after the RATE ACK leaves a
+  receipt for RATE only, the deployment shows `partially_delivered`, and
+  the compiler refuses a version that breaks index stability (§6.2).
+- **Receipts**: a playback download writes one F1 receipt per ACKed
+  table, keyed by the file's hash, and a `failed` line for a NACK.
+- **Managed set**: the compiler refuses table id `0x16`; `mm-termcfg`'s
+  user cannot rename over an unmanaged file in a sticky table directory.
 - **Adverts**: an approved set reaches a test terminal and its receipt
   hash equals the staged hash; each rejection rule in §5.2 has a test;
   a torn-write test (kill during staging) leaves the previous table
@@ -672,6 +815,8 @@ The full threat list and how each item is handled is
 | H-W2 | VFD character set and the meaning of `display_time` 0 and attributes 17-21. | Text and effect validation in §5.2. |
 | H-W3 | Does the terminal's card-call `call_cost` follow the RATE table entries (DW-1)? | Whether CARDMAN-sourced prices change what card callers are shown. |
 | H-W4 | Which calls make the terminal send `DLOG_MT_RATE_REQUEST`? | Scope of F3. |
+| H-W5 | Cut the line after the RATE ACK in a forced download. Does the terminal keep the new RATE with the old prefix tables, discard the partial download, or ask again (power-lost reason)? Same for a NACKed table. | Whether index stability (§6.2) is the only protection against a mixed set on the terminal (independent review I-2). |
+| H-W6 | Does the modem report the calling line's caller ID to mm_manager, and does it match the `terminal_id` in the session? | A check an emulator cannot pass by typing a payphone's number into a packet (§3.2 item 8, independent review I-6). |
 
 ## Appendix A. CARDMAN WAPI routes considered
 
@@ -688,8 +833,8 @@ All 49 rows of CARDMAN `bricks/runtime/web_routes.conf` at `9997d87`.
 | `POST /api/card/void` | `CVOD` | platform, gate | - | Not granted to `payphone` (ADR 40); release CDR used instead. |
 | `POST /api/card/balance` | `CBAL` | platform, csr, agi, gate | - | The DLOG auth response cannot carry a balance (G6); requesting it would widen `payphone` for nothing the terminal can show. |
 | `POST /api/newcust`, `/api/holder`, `/api/card`, `/api/card/load`, `/api/card/pin`, `/api/card/close` | `NEWC`, `HNEW`, `CNEW`, `CLOD`, `CPIN`, `CVOA` | issuer (+csr, gate) | - | Issuance and card admin happen at the issue station (CARDMAN ADR 41), not at a payphone. |
-| `POST /api/card/inquiry`, `/api/holder/inquiry`, `/api/card/history` | `CINQ`, `HINQ`, `CHIS` | platform, csr | - | CSR tools. |
-| `POST /api/bill/run`, `/api/bill/inquiry`, `/api/report/daily`, `/api/report/balance`, `/api/settle/run`, `/api/report/settlement`, `/api/report/billing-summary`, `/api/report/revenue`, `GET /api/metrics/business` | `BILW`, `BINQ`, `RPTD`, `RPBW`, `SETW`, `RPSW`, `RCBW`, `RPTR`, `MTBX` | issuer, admin, csr | - | Back-office reporting. Payphone traffic is visible there through `source:"mm_manager"` CDR rows; this design adds no reporting route. |
+| `POST /api/card/inquiry`, `/api/holder/inquiry`, `/api/card/history` | `CINQ`, `HINQ`, `CHIS` | platform, csr (`CINQ`); csr (`HINQ`, `CHIS`) | - | CSR tools. |
+| `POST /api/bill/run`, `/api/bill/inquiry`, `/api/report/daily`, `/api/report/balance`, `/api/settle/run`, `/api/report/settlement`, `/api/report/billing-summary`, `/api/report/revenue`, `GET /api/metrics/business` | `BILW`, `BINQ`, `RPTD`, `RPBW`, `SETW`, `RPSW`, `RCBW`, `RPTR`, `MTBX` | issuer, admin, csr (`BINQ`), gate (`MTBX`) | - | Back-office reporting. Payphone traffic is visible there through `source:"mm_manager"` CDR rows; this design adds no reporting route. |
 | `POST /api/sweep/expiry`, `/api/archive/run`, `/api/recon/run`, `/api/cdr/mediate` | `EXPW`, `ARCW`, `RCOW`, `CDMW` | admin | - | Housekeeping. |
 | `POST /api/bricks/probe`, `/api/bricks/version-check`; `GET /api/probe/*` (6) | `BPRB`, `BVCK`, `PBHA`, `PBEN`, `PBWO`, `PBVP`, `PBWE`, `PBTS` | admin | - | BRICKS capability probes. |
 | `POST /api/{lint,csvk,seed,conc,rgat,igat,sgat,agat,tgat,cgat,fgat,mgat}/run` | `LINT` ... `MGAT` (12) | gate | - | CI gates; the gate cert exists only in CI. |

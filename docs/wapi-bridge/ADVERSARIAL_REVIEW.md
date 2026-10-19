@@ -10,9 +10,8 @@ CARDMAN docs at the commits in `SPEC.md`'s header.
 
 **Limit of this review**: it was done by the same author in the same
 session as the draft. It is a structured red-team pass, not an
-independent one. An independent review (a second person, or a fresh
-session given only these files and the sources) is still worth doing
-before the owner accepts the ADR.
+independent one. An independent pass by a separate session follows in
+[the second section](#independent-pass-2026-10-18).
 
 Severity: **B** blocks the design as written, **H** high, **M** medium,
 **L** low. Disposition: **Fixed** (the spec now says something
@@ -94,3 +93,83 @@ rule protected each file but not the set.
 | `/api/rates` omits band, period, fees, overrides | CARDMAN `API_CONTRACTS.md` `GET /api/rates` |
 | Empty 200 on an abended task | CARDMAN `KNOWN_BRICKS_QUIRKS.md` "Re-verified on 3.4.1" |
 | `payphone` rate-limit exempt and telco-global | CARDMAN ADR 18, ADR 38, ADR 40 decision 4 |
+
+---
+
+## Independent pass, 2026-10-18
+
+Reviewer: a separate Claude Code session that did not write the draft or
+the first pass. It read the four documents and checked their claims
+against this fork at `c8c5c11` (`src/mm_manager.c`, `src/mm_manager.h`,
+`src/mm_proto.c`, `src/mm_card.h`, `src/mm_rateint.c`,
+`generate_advert_prompts.py`, `config/advert_prompts.csv`,
+`tools/cardman_bridge.py`, `docs/cardman-compat/`, `AI/SECURITY_RULES.md`)
+and CARDMAN `origin/main` `9997d87` (`API_CONTRACTS.md`,
+`MILLENNIUM_GATEWAY_CONTRACT.md`, `ARCHITECTURE_DECISIONS.md` ADR 10, 14,
+18, 40, 42, `KNOWN_BRICKS_QUIRKS.md`, `web_routes.conf`,
+`transactions.conf`, `ratesrv.rexx`, `wdial.rexx`). Same severity and
+disposition scale as above. Fixes are in the documents now; each fixed
+place cites the finding number.
+
+**Limit of this pass**: it is still a reading of documents and code, not
+a test. Nothing was run against a terminal or CARDMAN. The reviewer is
+another session of the same model, not a second person.
+
+### Summary
+
+| Sev | Found | Fixed | Accepted | Owner / Hardware |
+|---|---|---|---|---|
+| B | 1 | 1 (and H-W5) | 0 | 0 |
+| H | 5 | 5 (one also H-W6) | 0 | 0 |
+| M | 10 | 10 | 0 | 0 |
+| L | 5 | 5 | 0 | 0 |
+
+The **B** finding (I-2) is the same harm as A-10, wrong prices on a live
+phone, reached by a more ordinary path: a dropped line part way through
+a download. The F5 lock protects the table store, not the terminal.
+
+The first pass's "Claims re-verified" table was right line by line but
+missed that during a download the ACKs never reach the code it pointed
+at (I-1), and its A-3 fix moved the cardholder trail into `card_ref`
+instead of removing it (I-4).
+
+### Findings
+
+| # | Sev | Attack or failure | Disposition |
+|---|---|---|---|
+| I-1 | H | **F1 receipts would never be written.** The draft hooked receipts to `case DLOG_MT_TABLE_UPD_ACK` in `process_mm_table()`. In a manager-pushed download, `mm_download_tables()` calls `wait_for_table_ack()` (`src/mm_proto.c`), which reads and consumes each ACK itself; `process_mm_table()` never sees them. So nothing would ever reach `delivered`. `mm_download_tables()` also ignores that function's return value. And "sha256 of the bytes actually sent" never matches the staged file for tables mm_manager patches after loading (`DLOG_MT_FCONFIG_OPTS` `term_type`, `DLOG_MT_CALL_SCREEN_LIST` padding). | **Fixed** (`SPEC.md` §3.1 F1, ADR W6): the receipt is written where `wait_for_table_ack()` returns 0, hashes the file as loaded, records the resolved path, and a NACK writes a `failed` line. |
+| I-2 | **B** | **A cut-off download leaves a mixed set on the terminal.** `mm_download_tables()` sends RATE (`0x49`) before the prefix tables and does not stop after a failed ACK (`status` is overwritten on the next table). A line drop or a NACK after the RATE ACK leaves the terminal with new RATE and old NPA-NXX/LCD tables. If the new plan moved what an index means, live calls are priced from the wrong entries until the next download, which can be a technician visit away. A-10's lock does not help: the store was consistent; the delivery was not. | **Fixed** (§6.2 "Index stability", §3.1 F5): a version may not change what an index means while the published prefix map points at it; re-pointing takes two deployments, and the compiler enforces it. F5 stops sending managed rate tables after a failed ACK. **Hardware** H-W5: what the terminal does with a partial download. |
+| I-3 | H | **The config plane could switch off card validation.** §3.4 made `mm-termcfg` "the only writer of `.bin` files", with write access to the table directories. The card table `0x16` is one of those files, and its `vfy_flags` (`src/mm_card.h`) include `CARD_VF_NCCVAL_IND` (whether the terminal asks the manager to validate a card), `CARD_VF_PROMPT_FOR_PIN` and `CARD_VF_ACCS_ROUTING`. A bug or a compromised config identity could let card calls run with no `CAUT` and no hold, which W1 says the config plane must never be able to cause. | **Fixed** (§3.4, ADR W1): an explicit managed-table list (adverts and rate tables only), the compiler refuses other ids, sticky table directories with unmanaged files owned by the operator account, and the drift sweep alerts on unmanaged files too. |
+| I-4 | H | **`card_ref` is the same tracking key A-3 removed.** A-3 found that `masked_pan` gives subscribers per-cardholder call trails. Its fix sent every subscriber `card_ref`, which by design is the same for every call on a card, next to terminal, time, masked called number and `charged_cents`. Hashing hides the digits, not the trail. The key's lifetime was also unspecified: the existing bridge key is random per process and memory-only; persisting it would let whoever holds it reverse any `card_ref` by enumerating one telco's roughly 10^7 PANs. | **Fixed** (`SPEC.md` §3.2 item 4, `VOCABULARY.md` §3, §4.1, §5, ADR W8): `card_ref` is S2, sent only to `events.sensitive` subscribers, re-keyed per subscription so subscribers cannot join on it; the key lives only in memory and rotates every 24 h. Default events carry no card identifier. |
+| I-5 | H | **`dial_id` was S2, but it is nearly the PAN.** CARDMAN ADR 10: PAN = `9149 PPP D AAAAAAA C` and `dial_id` = `AAAAAAA`. With the telco's `PPP`, a one-digit product code and the Luhn digit, a `dial_id` gives the PAN in at most ten guesses, and it is what a customer keys at the AGI dial-in. S2 allowed it in masked local logs, next to `masked_pan`, whose last four digits overlap it. | **Fixed** (`VOCABULARY.md` §3, §4.1): `dial_id` is S3; `masked_pan` never shares a record with any part of it; the spool may not carry it (§3.2 item 4). |
+| I-6 | H | **The attempt limits do not stop lockouts, and the fleet limit is a kill switch.** CARDMAN locks a card after 3 consecutive bad PINs. At 60 `invalid` per 10 minutes fleet-wide, an emulator still locks 20 cards every 10 minutes. Once tripped, the fleet limit declined every card call on every payphone; terminal ids are printed on the payphones, so 61 bad attempts would stop card service everywhere. The per-terminal limit likewise lets anyone deny one payphone's card service. | **Fixed** (§3.2 item 8, ADR W1): a per-card limit (2 consecutive `invalid`, 24 h) so the payphone path cannot deliver a third strike by itself; the fleet limit alerts and tightens per-terminal limits instead of refusing everyone; the per-terminal denial risk is stated. **Hardware** H-W6: whether the modem's caller ID can confirm the claimed `terminal_id`. |
+| I-7 | M | **F3 would quote the newest plan to a terminal holding the old one.** A plan is staged long before it is delivered (until H-W1 passes, until a technician visits). Answering `0x3f` from the newest compiled lookup tells callers prices that the terminal's own RATE table does not charge. | **Fixed** (§3.1 F3, §6.5, ADR W9): one lookup per published version, chosen by the terminal's last `0x49` receipt; no receipt means today's answer and a warning. |
+| I-8 | M | **A rate change makes adverts already on the phone false.** The stock `config/advert_prompts.csv` says `Local coin calls` / `50-cents` and `$1.00 for 4-minutes`. A-20 checks prices only when an advert is approved; approving a rate plan never looked at adverts already in effect, so a price change leaves the old price on the display. | **Fixed** (§5.2): rate plan approval and deployment previews list price-bearing slots of the advert sets in effect on the target terminals, including the default set, and the approval must acknowledge them. |
+| I-9 | M | **The advert content policy is easy to slip past.** It checked each slot alone for 7+ digits or a `$`. A number split across two slots (`Call 212-555` / `0123 now`), a vanity number (`1-800-CALL-NOW`), or a price in words (`50-cents`, which is in the stock file) passed. | **Fixed** (§5.2): the digit check also runs on each hook state's slots joined in display order, counts letters next to digits as keypad digits, and the price check matches `c`/`cents` and `free`. |
+| I-10 | M | **INTL index range was wrong and could silently block or un-price a country.** Flags 2-63 plus 28 are RATE entries 30-91, not 28-91. A `rate_index` of 28 or 29 compiles to flags 0 (NCC rated) or 1 (blocked). The example's `default_rate_index: 0` uses the same encoding (`src/mm_rateint.c`) and meant "NCC rated", not RATE entry 0. | **Fixed** (§6.1, §6.2, `VOCABULARY.md` §4.6): range 30-91, with `"ncc_rated"` and `"blocked"` as explicit values for both countries and the default. |
+| I-11 | M | **"Never understate" understated.** Raising `initial_charge` while keeping `initial_period = initial_secs` bills the second block's time at the `addl` rate, which is lower whenever CARDMAN's second block is dearer. | **Fixed** (§6.4 step 3): fold both period and charge (`initial_secs + second_secs`, `initial_cents + second_cents`), flagged `lossy`, rejected on 16-bit overflow. |
+| I-12 | M | **The import ignored wildcard telco rows and carrier rows.** `GET /api/rates` returns every telco's rows unscoped, including `*` rows (CAUT's `no_tariff` rule names the universal `'*'/'*'/'*'` row). Selecting only the plan's exact `telco_id` drops the fallback. Several carrier rows for one `call_type` passed the duplicate check and one would be picked arbitrarily; the terminal cannot tell carriers apart. `ratesrv.rexx` orders only by `telco_id, call_type, carrier`, so a digest over rows tied on those flaps between identical pulls. | **Fixed** (§6.4 steps 1 and 5): telco rows, else `*` rows, per `call_type`; the highest price per block across carriers, flagged `lossy`; sort by all five fields before hashing. CARDMAN's exact tie-break is not in its contracts, so the label stays `approximate`. |
+| I-13 | M | **Profile and default deployments could sit at `staged` with no reason given, and rollback could be skipped.** `load_mm_table()` prefers `tables/<tid>/`, then the model profile, then `-d`; a per-terminal file shadows a default or profile deployment for good. `check_mm_table_is_newer()` never looks at the profile directory, so a craft force download skips a newer profile table whenever the `-d` file is older than the last download; §7.2's claim that a rename makes the craft force path pick up the new file was false for profile targets. Renaming `.prev` back for rollback restores an old mtime, which that check also skips. | **Fixed** (§3.4, §7.1, §7.2, `VOCABULARY.md` §4.6): deployments resolve the effective file per terminal and report `shadowed`; profile targets say they need a lost-memory download, `-c` or F2; rollback writes a fresh copy. |
+| I-14 | M | **F5's skip path and lock fairness.** `process_mm_table()` sends `DLOG_MT_TABLE_UPD` before `mm_download_tables()` runs, so "skip the download" happened after the terminal was told one was coming, a protocol state nobody has seen. For lost memory or power lost on download, skipping leaves the terminal with no tables. And `flock` gives a waiting exclusive locker no priority, so a default-target stage could wait for ever behind overlapping shared locks from many lines. | **Fixed** (§3.1 F5, §7.2): lock before the reply; wait up to 60 s for lost-memory reasons; a `.stage-intent` file gives staging priority; a stage that cannot lock in 10 minutes fails visibly. |
+| I-15 | M | **`cardman_quote` offered the card-plane identity to the config plane.** §6.3 listed a "`payphone`-group read grant" as `mm-termcfg`'s credential for `QUOT`. That contradicts W1 (no shared credential), and `payphone` also grants `CAUT` and `CDRI`. CARDMAN's proposed `QUOT` ACL is `payphone,mediation,admin`, which makes the mistake easy to make. | **Fixed** (§6.3): `ratesync` only, via R10. |
+| I-16 | M | **`called_number_masked` hid little.** "First 6 digits + `****`" of a 7-digit local number as dialed shows 6 of its 7 digits; for a short number it shows all of it; it was S1, so every subscriber got it with terminal and time. | **Fixed** (`VOCABULARY.md` §4.2, §5): made from the normalized number, keeping only the NPA (NANP) or `011` plus country code; anything else is `****`. |
+| I-17 | L | Appendix A listed `HINQ`/`CHIS` as `platform, csr` (both are `csr` only) and the back-office row omitted `gate` on `MTBX`. | **Fixed** (Appendix A). |
+| I-18 | L | R12 understated its edits, as A-13 found for R9: `WDIA` LINKs `RLIM`, whose ACL does not list `payphone`, so `acl-lint.sh` would fail; `transactions.conf`'s `WDIA` line and an ADR 18 review are also needed. | **Fixed** (§10.2 R12). |
+| I-19 | L | `AI/SECURITY_RULES.md`'s checklist says a valid `auth_code` is "exactly 8 hex chars". The bridge (`AUTH_CODE_RE`), `VOCABULARY.md` and CARDMAN_REQUESTS R3 say base-36 `[0-9A-Z]{8}`. The spec's precedence line ("the security rules win") would pick the wrong alphabet and decline every code with a letter past `F`. | **Fixed** (2026-10-18, at the owner's request): `AI/SECURITY_RULES.md` checklist, `COMPATIBILITY_PLAN.md` O2 item 2 and `AI/TASKS.md` T5 now say 8 chars of `[0-9A-Z]` (base-36), matching `src/mm_cardman_bridge.c` and `AUTH_CODE_RE`. Docs only; the code already checked base-36. |
+| I-20 | L | §5.1 said `generate_advert_prompts.py` "checks the size". It writes the file, then only prints a warning, and writes text longer than 20 characters as is. | **Fixed** (§5.1): stated as it is; the compiler enforces sizes itself. |
+| I-21 | L | `/healthz` `cardman_reachable` came from the last real call however old, so after a quiet night it reports a state nobody has checked. | **Fixed** (§3.2 item 3): `null` when the last outcome is older than 15 minutes. |
+
+### Claims this pass checked and found right
+
+| Claim | Where checked |
+|---|---|
+| Routine call-in does not download (lines commented out, and they also set `TTBLREQ_CRAFT_FORCE_DL`, so a re-enabled F2 would be mtime-filtered unless it bypasses that, as F2 says) | `src/mm_manager.c` `case DLOG_MT_CALL_IN` |
+| `0x3f` answer 240/100/60/25 outside `rating_test_mode` | `case DLOG_MT_RATE_REQUEST` |
+| RATE file 1191 bytes; `FLAG_PERIOD_UNLIMITED` bit 15; `rate_type_t` values | `src/mm_manager.h` |
+| Advert entry layout, 20 x 24, attribute codes 0-5 and 17-21, `0x40` blank-before | `src/mm_manager.h`, `generate_advert_prompts.py` |
+| 49 WAPI routes; `RATE` ACL `mediation,admin`; `ratesrv.rexx` LINKs `ACTR` and `RLIM`, stamps `mediation:<CN>`, caps 30/60 s, fails closed mid-list | `web_routes.conf`, `transactions.conf`, `ratesrv.rexx` |
+| `payphone`: `CAUT` + `CDRI` only, telco-global, rate-limit exempt; actor stamps | ADR 40, gateway contract §2 |
+| `/api/rates` omits band, period, fees, overrides; minute-precision `effective_ts` | `API_CONTRACTS.md` |
+| Basic-Auth failures are checked in `bricksd` with no lockout; `pin_fails` locks at 3 consecutive | ADR 14 |
+| SNI passthrough because mTLS identity must reach `bricksd` | ADR 42 decision 3 |
+| Empty 200 on an abended task | `KNOWN_BRICKS_QUIRKS.md` "Re-verified on 3.4.1" |

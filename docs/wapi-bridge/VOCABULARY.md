@@ -74,13 +74,24 @@ Every field has a class. The class decides where it may travel.
 
 | Class | Meaning | May appear in |
 |---|---|---|
-| **S3** secret card data | `pan`, `pin`, raw track/stripe data | card plane only: mm_manager memory -> loopback -> bridge -> CARDMAN. Never in logs, SQLite, events, config plane, exports. |
-| **S2** linkable or personal | `masked_pan`, `auth_code`, full `called_number`, `dnis`, `dial_id` | card plane, CARDMAN, masked local logs. In events, `called_number` only as `called_number_masked`; `masked_pan` and `auth_code` only to subscribers holding the `events.sensitive` grant. Other subscribers correlate a card by `card_ref` (S1). |
+| **S3** secret card data | `pan`, `pin`, `dial_id`, raw track/stripe data | card plane only: mm_manager memory -> loopback -> bridge -> CARDMAN. Never in logs, SQLite, events, config plane, exports. |
+| **S2** linkable or personal | `masked_pan`, `card_ref`, `auth_code`, full `called_number`, `dnis` | card plane, CARDMAN, masked local logs. In events, `called_number` only as `called_number_masked`; `masked_pan`, `card_ref` and `auth_code` only to subscribers holding the `events.sensitive` grant, with `card_ref` re-keyed per subscription. Other subscribers get no card identifier at all. |
 | **S1** operational | terminal ids and line numbers, states, durations, counts, hashes, versions | logs, events, config plane |
 | **S0** public | advert text, published prices | anywhere |
 
 `called_number` is S2 because the numbers callers dial are personal
 data, not because it is card data.
+
+`dial_id` is S3, not S2 as the first draft had it (independent review
+I-5). Under CARDMAN ADR 10 the PAN is `9149 PPP D AAAAAAA C` and
+`dial_id` is the `AAAAAAA`: with the telco's `PPP`, the one-digit
+product code `D` and the Luhn digit `C`, a `dial_id` gives the PAN in at
+most ten guesses, and it is also what a customer keys at the AGI
+dial-in, where CDRI resolves it to the card.
+
+`card_ref` is S2, not S1 (independent review I-4): one card always has
+the same `card_ref`, so with terminal and time it is the same cardholder
+trail as `masked_pan`. Hashing hides the digits, not the trail.
 
 ## 4. Data dictionary
 
@@ -93,9 +104,9 @@ name (`BRIDGE_CONTRACT.md` §2). A dash means "not present there".
 | Canonical | Type | Class | CARDMAN | DLOG | Bridge hop | Notes |
 |---|---|---|---|---|---|---|
 | `pan` | `digits(16)` | S3 | `pan` (CAUT, CDRI) | `dlog_mt_funf_card_auth.card_number`, `dlog_mt_call_details.card_num` (packed BCD) | `pan` | 16 digits for CARDMAN cards (ADR 10). |
-| `masked_pan` | `masked_pan` | S2 | `pan_masked` (CINQ) | - | - | Only PAN form allowed outside the card plane. Nearly unique within a telco (last 4 = 3 `dial_id` digits + check digit), so it is a cardholder tracking key: `events.sensitive` only. |
-| `card_ref` | 16 lowercase hex | S1 | - | - | - | HMAC-SHA256 of `pan` under a key held only by the bridge, truncated. Same card -> same `card_ref`; not reversible without the key. The default card identifier in events. |
-| `dial_id` | `digits(7)` | S2 | `dial_id` (CDRI alt, CINQ masked) | - | - | Not used by payphones; listed for AGI interchange. |
+| `masked_pan` | `masked_pan` | S2 | `pan_masked` (CINQ) | - | - | Only PAN form allowed outside the card plane. Nearly unique within a telco (last 4 = 3 `dial_id` digits + check digit), so it is a cardholder tracking key: `events.sensitive` only. Never in the same record as any part of `dial_id`. |
+| `card_ref` | 16 lowercase hex | S2 | - | - | - | HMAC-SHA256 of `pan` under a key held only in the bridge's memory, rotated every 24 h, truncated. Same card -> same `card_ref` within one key period; not reversible without the key, but reversible by enumeration with it. The relay re-keys it per subscription. `events.sensitive` only. |
+| `dial_id` | `digits(7)` | S3 | `dial_id` (CDRI alt, CINQ masked) | - | - | Not used by payphones; listed for AGI interchange. Card-equivalent: see §3. |
 | `pin` | `digits(4)` | S3 | `pin` (CAUT funf) | `dlog_mt_funf_card_auth.pin` (4 BCD) | `pin` | 4 digits only on this wire (D4). |
 | `service_code` | `digits(3)` | S1 | `service_code` | `dlog_mt_funf_card_auth.service_code` | `service_code` | |
 | `card_expiry` | `YYYY-MM` | S2 | `expiry` (`YYYY-MM-DD`, issuance) | `exp_yy`, `exp_mm` | - | Not forwarded today. |
@@ -108,7 +119,7 @@ name (`BRIDGE_CONTRACT.md` §2). A dash means "not present there".
 | `seq_num` | integer 0-65535 | S1 | `seq_num` | `dlog_mt_funf_card_auth.seq` | `seq_num` | Wraps. Part of CAUT idempotency. |
 | `requested_at` | `ts` | S1 | `requested_at` | - (manager clock) | `requested_at` | Byte-identical on retry, or a second hold is placed. |
 | `called_number` | `digits(1..20)` | S2 | `called_number` (normalized) | `dlog_mt_funf_card_auth.phone_number` (auth), `called_num` (CDR) | `called_number` (as dialed) | Bridge normalizes (`BRIDGE_CONTRACT.md` §3). **Trap**: the DLOG auth field named `phone_number` is the *dialed* number, not the terminal's line. |
-| `called_number_masked` | string | S1 | - | - | - | first 6 digits + `****`; event form. |
+| `called_number_masked` | string | S1 | - | - | - | Event form, made from the **normalized** number: NANP keeps the 3-digit NPA (`212*******`), international keeps `011` and the country code, anything else is `****`. The first draft kept the first 6 digits, which for a 7-digit local number as dialed is 6 of its 7 digits and for a short number is all of it (independent review I-16). |
 | `international` | `enum(yes, no)` | S1 | `international` (also accepts `unknown`) | derived: `call_type & 0x0F == 0x06` | `international` | PIV never emits `unknown`. |
 | `disposition` | `enum` §6.1 | S1 | `disposition` | - | `disposition` | |
 | `terminal_verdict` | `enum(valid, invalid)` | S1 | - | `dlog_mt_auth_resp_code.resp_code` (0 / non-0) | `approved` (bool) | Only `approved` -> `valid`. |
@@ -177,13 +188,13 @@ name (`BRIDGE_CONTRACT.md` §2). A dash means "not present there".
 | `dlog_rate_type` | `enum` §6.5 | S0 | `rate_table_entry.type` | |
 | `initial_period_secs`, `additional_period_secs` | integer 1-32767, or `"unlimited"` | S0 | `initial_period`, `additional_period` (bit 15 = unlimited) | |
 | `initial_charge_cents`, `additional_charge_cents` | integer 0-65535 | S0 | `initial_charge`, `additional_charge` | |
-| `country_code`, `rate_index` | integer; 28-91 | S0 | `intl_rate_table_entry.ccode`, `flags + 28` | |
+| `country_code`, `rate_index` | integer; `rate_index` is 30-91, `"ncc_rated"` or `"blocked"` | S0 | `intl_rate_table_entry.ccode`, `flags + 28` (flags 0 = NCC rated, 1 = blocked) | Not 28-91: 28 and 29 would encode as flags 0 and 1. |
 | `tolerance` | `enum(exact, approximate)` | S0 | - | Imported-plan honesty label. |
 | `lossy` | boolean | S0 | - | Entry could not represent the source exactly. |
 | `table_id` | string `0x..` | S1 | DLOG table id | Hex string, e.g. `"0x1d"`. |
 | `content_sha256` | `sha256` | S1 | - | Of the compiled table file. |
 | `deployment_state` | `enum(staging, staged, partially_delivered, delivered, failed, superseded)` | S1 | - | |
-| `table_state` | `enum(staged, delivered, drift, failed)` | S1 | - | `delivered` only with a receipt. |
+| `table_state` | `enum(staged, delivered, shadowed, drift, failed)` | S1 | - | `delivered` only with a receipt. `shadowed`: a more specific file wins for that terminal (`SPEC.md` §3.4). |
 
 ## 5. Event envelope
 
@@ -203,8 +214,7 @@ CloudEvents'; `pivversion` is a PIV extension attribute.
   "data": {
     "cdr_id": "mm-2125551000-17-2026-10-13T18:43:00Z",
     "terminal_id": "2125551000",
-    "card_ref": "3f9a1c07d2b84e61",
-    "called_number_masked": "212555****",
+    "called_number_masked": "212*******",
     "start_ts": "2026-10-13T18:43:00Z",
     "duration_secs": 95,
     "reported_charge_cents": 175,
@@ -218,9 +228,10 @@ CloudEvents'; `pivversion` is a PIV extension attribute.
 - `source`: `urn:piv:<component>:<deployment>`.
 - `subject`: `terminal/<terminal_id>`, `advert-set/<id>`,
   `rate-plan/<id>`, or `deployment/<id>`.
-- `data` holds only S0-S1 fields, plus `called_number_masked`.
-  `masked_pan` and `auth_code` are added only for `events.sensitive`
-  subscribers (§3). Never S3.
+- `data` holds only S0-S1 fields (`called_number_masked` is S1).
+  `masked_pan`, `card_ref` (re-keyed per subscription) and `auth_code`
+  are added only for `events.sensitive` subscribers (§3); the example
+  above is what everyone else gets. Never S3.
 - Events are informational, not billing records. CARDMAN is the only
   money record; consumers must dedupe on `id` before summing anything.
 
@@ -228,8 +239,8 @@ CloudEvents'; `pivversion` is a PIV extension attribute.
 
 | Type | Emitted by | When | Key `data` fields |
 |---|---|---|---|
-| `io.github.onthestrugglebus.piv.card.authorization.decided.v1` | bridge | after a CAUT exchange | `terminal_id`, `card_ref`, `seq_num`, `disposition`, `terminal_verdict`, `called_number_masked`, `international` |
-| `io.github.onthestrugglebus.piv.card.hold.released.v1` | bridge | release CDR sent for `approved_limited` or a lost approval | `terminal_id`, `card_ref`, `cdr_id`, `cdr_state` |
+| `io.github.onthestrugglebus.piv.card.authorization.decided.v1` | bridge | after a CAUT exchange | `terminal_id`, `card_ref` (sensitive only), `seq_num`, `disposition`, `terminal_verdict`, `called_number_masked`, `international` |
+| `io.github.onthestrugglebus.piv.card.hold.released.v1` | bridge | release CDR sent for `approved_limited` or a lost approval | `terminal_id`, `card_ref` (sensitive only), `cdr_id`, `cdr_state` |
 | `io.github.onthestrugglebus.piv.call.recorded.v1` | bridge | after a CDRI exchange | §4.4 fields, masked |
 | `io.github.onthestrugglebus.piv.call.delivery_failed.v1` | bridge | CDR not accepted (`delivered:false`) | `cdr_id`, `terminal_id`, `retryable` |
 | `io.github.onthestrugglebus.piv.terminal.status.v1` | termcfg | new status/version rows seen | `terminal_id`, `terminal_model`, `mtr_version`, last call-in |

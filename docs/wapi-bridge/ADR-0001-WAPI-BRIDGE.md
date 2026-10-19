@@ -1,6 +1,8 @@
 # ADR-0001: WAPI bridge, terminal configuration API, and a shared vocabulary
 
 - **Status**: Proposed, 2026-10-18. Owner decisions DW-1 to DW-6 are open.
+  Independently reviewed 2026-10-18 (`ADVERSARIAL_REVIEW.md`, second
+  section); its fixes are in.
 - **Scope**: this fork (`OnTheStruggleBus/mm_manager`) and the processes
   that run beside it on the payphone host. CARDMAN changes appear only as
   requests (R9-R11).
@@ -41,9 +43,14 @@ PAN/PIN and talks only to mm_manager (loopback/Unix socket) and CARDMAN
 TERMREG. The config plane (`mm-termcfg`) owns adverts, rate plans,
 deployments, audit and event relay, and never sees card data. They
 share no listener, no credential, and no process. The bridge also
-refuses unenrolled terminals and applies per-terminal and fleet attempt
-limits, because `payphone` has no CARDMAN rate limit and a DLOG emulator
-could otherwise lock customers' cards with wrong PINs (review A-1).
+refuses unenrolled terminals and applies per-card, per-terminal and
+fleet attempt limits, because `payphone` has no CARDMAN rate limit and a
+DLOG emulator could otherwise lock customers' cards with wrong PINs
+(review A-1). The per-card limit is what stops lockouts; the fleet limit
+only alerts and tightens, because a fleet-wide refusal would let anyone
+stop every card call (review I-6). `mm-termcfg` writes only the advert
+and rate tables; it cannot write the card table or any other table that
+controls the card path (review I-3).
 *Why*: the config
 plane needs operator and app access; putting that on the process holding
 PANs would widen the card-data attack surface that `SECURITY_RULES.md`
@@ -90,7 +97,11 @@ written tmp + fsync + rename into the store mm_manager already reads,
 under a lock mm_manager also holds for a whole download, so a terminal
 never receives half old and half new tables (review A-10); the previous
 file is kept. A table is `delivered` only when a new fork hook
-records a `DLOG_MT_TABLE_UPD_ACK` receipt whose hash matches. Delivery
+records a receipt whose hash matches, at the point where
+`wait_for_table_ack()` returns success during the download (review I-1).
+Because a cut-off download can still leave a terminal with new RATE and
+old prefix tables, a plan version may not change what an index means
+while the published prefix map points at it (review I-2). Delivery
 on routine call-in (F2) is built behind a flag and enabled only after
 hardware check H-W1.
 
@@ -100,14 +111,20 @@ app, roles, rate limits, append-only audit. Unix socket by default; the
 HTTPS listener is opt-in.
 
 **W8. Integration is by masked, signed events.** The bridge writes
-masked events to a local spool, identifying cards by a keyed hash
-(`card_ref`) rather than a masked PAN; `mm-termcfg` relays them as
+masked events to a local spool; `mm-termcfg` relays them as
 signed CloudEvents to HTTPS subscribers (no internal targets). The relay
 drops any event carrying an S3 field or a Luhn-valid digit run. The bridge keeps CARDMAN as its only egress.
+Events carry no card identifier by default. `events.sensitive`
+subscribers get `masked_pan` and a keyed hash (`card_ref`) re-keyed per
+subscription; both are S2, because a stable per-card id is a cardholder
+trail whether or not it is hashed (review I-4). `dial_id` is S3: under
+CARDMAN ADR 10 it nearly determines the PAN (review I-5).
 
-**W9. mm_manager answers `DLOG_MT_RATE_REQUEST` from the published
-plan** (a compiled local file), replacing the hard-coded answer, with no
-network call inside the protocol loop.
+**W9. mm_manager answers `DLOG_MT_RATE_REQUEST` from the plan the
+terminal actually holds** (a compiled local file per published version,
+chosen by the terminal's last RATE receipt, not the newest plan; review
+I-7), replacing the hard-coded answer, with no network call inside the
+protocol loop.
 
 **W10. No change to CARDMAN money behaviour, the DLOG protocol, or the
 bridge hop's wire format.** The bridge hop gains only an optional
