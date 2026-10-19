@@ -57,7 +57,7 @@ other cards not started.
   `ForkRejectsBrokenBridge`.
 - **Goal**: refuse non-loopback `CARDMAN_BRIDGE_ADDR` unless an explicit
   override env var is set; validate digit-only PAN/PIN/called number
-  before building JSON; require `auth_code` to be exactly 8 hex chars
+  before building JSON; require `auth_code` to be exactly 8 chars of `[0-9A-Z]` (base-36)
   (fully consumed, no overflow) before approving; decline on any
   validation failure.
 - **Files**: `src/mm_cardman_bridge.c`.
