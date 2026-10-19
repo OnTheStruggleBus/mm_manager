@@ -818,6 +818,29 @@ The full threat list and how each item is handled is
 | H-W5 | Cut the line after the RATE ACK in a forced download. Does the terminal keep the new RATE with the old prefix tables, discard the partial download, or ask again (power-lost reason)? Same for a NACKed table. | Whether index stability (§6.2) is the only protection against a mixed set on the terminal (independent review I-2). |
 | H-W6 | Does the modem report the calling line's caller ID to mm_manager, and does it match the `terminal_id` in the session? | A check an emulator cannot pass by typing a payphone's number into a packet (§3.2 item 8, independent review I-6). |
 
+### 14.1 Blocker: no way to make physical test cards yet
+
+CARDMAN can mint a test card's number and PIN (`NEWC`), but nothing
+today puts that number on a card a terminal can read. CARDMAN's issue
+station, which would drive a stripe writer, is proposed only (CARDMAN
+ADR 41, `docs/frontends/ISSUE_STATION.md`, not built), and this fork has
+no issuance path. Until one exists:
+
+| Needs a physical CARDMAN card | Does not |
+|---|---|
+| H-W3; every card-path step in `HARDWARE_TEST_PLAN.md` (sections 0-3); the card-plane hardware acceptance in §13; any attempt-limit or allow-list check done from a real terminal | H-W1, H-W2, H-W4 (check with a coin call first), H-W5, H-W6; everything on the config plane (adverts, rate tables, staging, delivery receipts); card-plane tests by `.dlog` playback and against the stub or live CARDMAN (`tools/cardman_live_test.sh`) |
+
+Ways to unblock it, none chosen yet: (a) build the CARDMAN issue station,
+or just its stripe-encoding step (Track 2 layout in CARDMAN
+`docs/frontends/ACCESS_METHODS_TRACK2.md`); (b) encode a `NEWC`-issued
+test card by hand with a stand-alone magstripe writer, keeping the
+security rules (test cards only, PIN never written down with the card,
+captures deleted after the session); (c) keyed card-number entry at the
+terminal, if the card table allows it (the CDR `MANUAL_CARD_NUMBER` flag
+suggests the terminal supports it; unverified, and keyed entry may not
+exercise the same path as a swipe). This is extra work outside this
+spec's phases W1-W7.
+
 ## Appendix A. CARDMAN WAPI routes considered
 
 All 49 rows of CARDMAN `bricks/runtime/web_routes.conf` at `9997d87`.

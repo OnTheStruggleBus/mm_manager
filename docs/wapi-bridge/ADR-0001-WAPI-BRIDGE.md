@@ -145,6 +145,11 @@ All six were decided by the owner on 2026-10-18, each as recommended.
 
 ## Consequences
 
+- **Physical test cards are a prerequisite outside this ADR.** Nothing
+  can yet put a CARDMAN card number on a stripe (CARDMAN's issue station,
+  its ADR 41, is proposed only). Card-path hardware tests stay blocked
+  until that exists; the config plane and playback tests do not need it
+  (`SPEC.md` §14.1).
 - Two new processes to supervise on the payphone host (bridge, termcfg)
   in addition to one mm_manager per line.
 - Five small fork changes (F1-F5 in `SPEC.md` §3.1; F4 is documentation only), each in a
