@@ -451,8 +451,16 @@ own mm_manager.** This resolves design review H1 and H2.
   stays the system of record, so nothing billable depends on the local
   databases.
 - One more process holds card data in memory (datamodem), plus the
-  shim, which this repo owns. `THREAT_MODEL.md` gains three rows
-  (`SPEC.md` §7).
+  shim, which this repo owns. `THREAT_MODEL.md` gains four rows and a
+  refinement of trust boundary 1 (`SPEC.md` §7), and each control C-1 to
+  C-7 names the threat-model sink or boundary it covers.
+- The soft modem fits ADR-0001 without changing its planes (`SPEC.md`
+  §3.7). It is a line-side front end under mm_manager, run as its own
+  user, with no path to the bridge's socket or secrets. Its health
+  events are three new PIV v1 event types, all S1
+  (`../wapi-bridge/VOCABULARY.md` §4.7, §5.1, §6.6-6.7), delivered by
+  `mm-termcfg`'s relay from a shim spool. Table `0x21` stays
+  operator-owned, outside the config plane's managed set.
 - `COMPATIBILITY_PLAN.md` §1's `app_softmodem -> TCP -> socat PTY` box
   is replaced by this design, and its §5 risk now points to S4.
 - The soft modem's audio path becomes a new failure source: codec,

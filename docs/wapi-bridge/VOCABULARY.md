@@ -136,6 +136,8 @@ name (`BRIDGE_CONTRACT.md` §2). A dash means "not present there".
 | `terminal_serial` | string | S1 | `terminal.terminal_serial` | - | - | Sent empty today. |
 | `terminal_model` | `enum(coin_basic, card, desk, inmate, multipay, ...)` | S1 | - | `term_type_to_model()` | - | Selects table profile directory. |
 | `mtr_version` | string | S1 | - | `term_type_to_mtr()` (`MTR_2_X`, `MTR_1_20`, ...) | - | Selects the table list. |
+| `last_session_ts` | `ts` | S1 | - | - | - | End of the terminal's last session with any mm_manager instance, from `tables/<terminal_id>/terminal.json` (`SPEC.md` F1). |
+| `expected_callin_interval_secs` | `secs` | S1 | - | - | - | Operator-set in `mm-termcfg`'s inventory; how often the terminal should call in. Drives `terminal.callin.missed` (ADR-0002). |
 
 ### 4.4 Call record
 
@@ -196,6 +198,19 @@ name (`BRIDGE_CONTRACT.md` §2). A dash means "not present there".
 | `deployment_state` | `enum(staging, staged, partially_delivered, delivered, failed, superseded)` | S1 | - | |
 | `table_state` | `enum(staged, delivered, shadowed, drift, failed)` | S1 | - | `delivered` only with a receipt. `shadowed`: a more specific file wins for that terminal (`SPEC.md` §3.4). |
 
+### 4.7 Soft modem (ADR-0002)
+
+Line-side health of the soft modem path (`../softmodem/SPEC.md` §4.5).
+Every field is S1; this path defines no S2 or S3 field.
+
+| Canonical | Type | Class | Notes |
+|---|---|---|---|
+| `modem_id` | `id` | S1 | One per `mm-softmodem-dte` instance, which is one per modem line, e.g. `"soft-1"`. Not a terminal: the shim cannot tell which terminal is calling. |
+| `refusal_reason` | `enum` §6.6 | S1 | Why the shim refused a call. |
+| `call_end_reason` | `enum` §6.7 | S1 | How an accepted call ended. |
+| `dte_silent` | boolean | S1 | The call trained, but mm_manager sent nothing during it. |
+| `duration_secs` | `secs` | S1 | From `CONNECT` to the end of the call (the same name and unit as §4.4). |
+
 ## 5. Event envelope
 
 CloudEvents 1.0, JSON structured mode. Required attributes are
@@ -227,7 +242,7 @@ CloudEvents'; `pivversion` is a PIV extension attribute.
 - `id`: unique per event, used to dedupe (at-least-once delivery).
 - `source`: `urn:piv:<component>:<deployment>`.
 - `subject`: `terminal/<terminal_id>`, `advert-set/<id>`,
-  `rate-plan/<id>`, or `deployment/<id>`.
+  `rate-plan/<id>`, `deployment/<id>`, or `modem/<modem_id>`.
 - `data` holds only S0-S1 fields (`called_number_masked` is S1).
   `masked_pan`, `card_ref` (re-keyed per subscription) and `auth_code`
   are added only for `events.sensitive` subscribers (§3); the example
@@ -249,6 +264,14 @@ CloudEvents'; `pivversion` is a PIV extension attribute.
 | `io.github.onthestrugglebus.piv.config.rate_plan.source_failed.v1` | termcfg | an import failed a fail-safe | `rate_plan_id`, `source.kind`, `error` |
 | `io.github.onthestrugglebus.piv.config.table.delivered.v1` | termcfg | receipt matches staged hash | `terminal_id`, `table_id`, `content_sha256`, `deployment_id` |
 | `io.github.onthestrugglebus.piv.config.table.drift.v1` | termcfg | managed file hash unknown | `terminal_id`, `table_id`, `content_sha256` |
+| `io.github.onthestrugglebus.piv.modem.call.refused.v1` | mm-softmodem-dte (ADR-0002) | the shim refused a call | `modem_id`, `refusal_reason` |
+| `io.github.onthestrugglebus.piv.modem.call.ended.v1` | mm-softmodem-dte (ADR-0002) | an accepted call ended | `modem_id`, `call_end_reason`, `duration_secs`, `dte_silent` |
+| `io.github.onthestrugglebus.piv.terminal.callin.missed.v1` | termcfg (ADR-0002) | `last_session_ts` + `expected_callin_interval_secs` + one retry interval has passed | `terminal_id`, `last_session_ts`, `expected_callin_interval_secs` |
+
+The shim writes its events to its own spool, which the relay reads as
+it reads the bridge's (`SPEC.md` §9). `terminal.callin.missed` applies to
+every terminal, whichever modem answers it. Under §8 these three types
+and the enums in §6.6 and §6.7 are a minor change.
 
 ## 6. Enumerations
 
@@ -307,6 +330,25 @@ Bit 7 (`FLAG_CDR_IXL`) marks an international CDR. Source:
 `not_available` (3, not valid in a RATE entry), `invalid_npa_nxx` (4),
 `toll_intra_lata` (5), `toll_inter_lata` (6), `mm_inter_lata` (7),
 `mm_local` (8), `mm_international` (9).
+
+### 6.6 `refusal_reason` (soft modem shim)
+
+| Value | Meaning (`../softmodem/SPEC.md` §4.2) |
+|---|---|
+| `header` | Malformed header, or `mod` not `v22`, or `rate` not `1200` |
+| `busy` | The shim is already `ONLINE` |
+| `cooldown` | The shim is in `COOLDOWN` |
+| `no_reader` | No mm_manager has the PTY open |
+| `peer` | The socket peer's uid is not the shim's |
+
+### 6.7 `call_end_reason` (soft modem shim)
+
+| Value | Meaning (`../softmodem/SPEC.md` §4.3) |
+|---|---|
+| `line_eof` | datamodem ended the call socket (normal terminal hang-up, or datamodem's own timeouts) |
+| `dte_idle` | The shim's idle timer fired: nothing from mm_manager for `--idle-timeout` |
+| `dte_gone` | mm_manager closed the PTY (`POLLHUP`) |
+| `shutdown` | The shim was stopped while `ONLINE` |
 
 ## 7. Error envelope
 

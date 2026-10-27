@@ -680,9 +680,11 @@ plane) or secrets. Retained with the published artifacts.
 
 ## 9. Integration with other apps (events)
 
-- The relay reads the bridge's masked spool and `mm-termcfg`'s own
-  events, wraps each as a CloudEvents 1.0 JSON event in the vocabulary
-  (`VOCABULARY.md` §5), and POSTs it to each subscriber.
+- The relay reads the bridge's masked spool, the soft modem shim's
+  spool when that is deployed (`../softmodem/SPEC.md` §4.5; S1 only), and
+  `mm-termcfg`'s own events. It wraps each as a CloudEvents 1.0 JSON
+  event in the vocabulary (`VOCABULARY.md` §5) and POSTs it to each
+  subscriber.
 - Each delivery is signed: `PIV-Signature: t=<unix>,v1=<hex HMAC-SHA256 over "t.body">`
   with a per-subscription secret; receivers reject a `t` older than
   300 s.

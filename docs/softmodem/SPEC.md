@@ -265,10 +265,21 @@ instances never write the same `tables/<terminal_id>/` at once.
 **Moving a terminal to the soft modem (interim, until U2):**
 
 1. Set `MM_MODEM=bell` on the terminal's ATA endpoint.
-2. Generate `tables/<terminal_id>/mm_table_21.bin` with the table tool
-   (§3.1a, T-7).
-3. Have the terminal call in for a table update, and confirm in
-   `tables/<terminal_id>/table_update.log` that table `0x21` was ACKed.
+2. As the operator account, generate `tables/<terminal_id>/mm_table_21.bin`
+   with the table tool (§3.1a, T-7). The tool writes a temporary file in
+   the same directory and renames it into place, as ADR-0001 staging
+   does (`docs/wapi-bridge/SPEC.md` §7.2 step 2). Once F5 exists, it
+   holds `tables/<terminal_id>/.lock` while it does so. Table `0x21` is
+   not a managed table, so `mm-termcfg` must not write it (§3.7).
+3. Force a table download from the terminal (craft force download, or
+   F2 once it is verified). A routine call-in downloads no tables
+   (`docs/wapi-bridge/SPEC.md` §3.1 F2), so waiting for the next
+   scheduled call-in does nothing. Confirm that table `0x21` was ACKed:
+   in `tables/<terminal_id>/table_update.log` today, or once F1 exists
+   by a `delivery.log` receipt whose sha256 matches the generated file.
+   The drift sweep (`docs/wapi-bridge/SPEC.md` §7.4) raises one
+   `config.table.drift` for the new unmanaged file. That is expected:
+   record it against the migration.
 4. Remove `MM_MODEM` (the soft route) and do one test call-in.
 
 **Rollback or recovery:** set `MM_MODEM=bell` again. Use it when a
@@ -277,6 +288,56 @@ lost its downloaded MODEM table. Once a datamodem release with U2 is
 deployed, steps 1-3 and the `bell` route are no longer needed for new
 terminals. Keep `mm-bell` until every terminal has proven it can call in
 on U2.
+
+### 3.7 Placement with the bridge
+
+The soft modem joins the payphone host of ADR-0001
+(`docs/wapi-bridge/SPEC.md` §2) as a line-side front end. It adds no
+plane: it sits below mm_manager, where the hardware modem was, and
+everything from mm_manager up is unchanged.
+
+```
+ voice LAN/VLAN (C-1)                                   payphone host
+ ATA ── Asterisk ──SIP/RTP──> datamodem ─exec─> connect ─UDS─> mm-softmodem-dte
+                                                                   │ PTY
+ hardware modem (or el-modem) ── tty ──> mm-manager-bell           v
+                                              │            mm-manager-soft
+                                              └──── loopback / UDS ─┘
+                                                        v
+                                                    mm-bridge ── mTLS ──> CARDMAN
+              table store (tables/) <── atomic writes ── mm-termcfg ── events ──> apps
+                 ^ read, F1 receipts                       ^ reads spools
+             both mm_manager instances            bridge spool, shim spool
+```
+
+| Process | User | Listens on | Talks to | Card data | Under |
+|---|---|---|---|---|---|
+| datamodem (`answer`) | `mm-modem` | SIP/RTP on the voice-network address only (`bind-addr`) | Asterisk; runs `connect` | Clear PAN/PIN in transit (C-7) | This spec |
+| `mm-softmodem-dte` | `mm-modem` | `dte.sock` (0600) and the PTY master; no network | mm_manager (PTY); its event spool | Clear PAN/PIN in transit | This spec |
+| `mm-manager-soft`, `mm-manager-bell` | The mm_manager user of ADR-0001 §3.2 | Nothing | Their modem; the bridge listener; the table store | As today | ADR-0001 F1-F5 |
+| `mm-bridge` | Bridge user | Loopback or UDS only | CARDMAN `CAUT`/`CDRI` only | Yes | ADR-0001 card plane |
+| `mm-termcfg` | Config user | Config API | Rate source, webhooks; reads both spools | None, ever | ADR-0001 config plane |
+
+Rules this placement adds:
+
+- `mm-modem` is not in the group of the bridge's socket, and cannot read
+  the bridge's secrets, the table store, or either `mm_manager.db`.
+  Whatever reaches datamodem can act as a terminal (C-6), but it cannot
+  skip mm_manager and talk to the bridge directly.
+- The `mm-modem` user's egress is limited to Asterisk's SIP and RTP
+  addresses (an nftables owner-match rule). The bridge's egress
+  allow-list (CARDMAN only) does not change, and `mm-termcfg` has no
+  route to the voice network.
+- Both mm_manager instances use the same `-t`/`-d` table store
+  (ADR-0001 F4) and the same bridge listener. A terminal is enrolled on
+  the bridge allow-list once. Moving it between `soft` and `bell` changes
+  only the Asterisk route, not its enrollment, its attempt-limit state,
+  or its staged tables.
+- Table `0x21` stays outside `mm-termcfg`'s managed set
+  (`docs/wapi-bridge/SPEC.md` §3.4). A config-plane bug that rewrote it
+  could stop terminals calling in, which is the kind of change W1 keeps
+  away from the config plane. It is written by the operator account, as
+  `0x16` is.
 
 ## 4. Interface contracts
 
@@ -367,20 +428,38 @@ header. There is no debug flag that changes this (rule 4).
 ### 4.5 Health signals and alarms
 
 Without these, every failure on this path shows up only as a terminal
-Error 24 in the field (design review M3). Every signal is a count or a
-state, never line data (S0 in ADR-0001's vocabulary):
+Error 24 in the field (design review M3). Every signal is a count, a
+state or a terminal id, never line data: class S1 in the shared
+vocabulary ([`VOCABULARY.md`](../wapi-bridge/VOCABULARY.md) §3). No
+S2 or S3 field is defined for this path, and none may be added.
 
-| Signal | Source | Alarm when |
-|---|---|---|
-| `mm-modem` reachable | Asterisk AOR `qualify_frequency` on the datamodem endpoint | Unreachable for more than 2 minutes (lost registration or crash) |
-| Calls accepted and refused, by reason (`header`, `busy`, `cooldown`, `no_reader`, `peer`) | Shim INFO log, also as counters | Any `no_reader` or `peer`; `cooldown` refusals more than 3 per hour (M1 window too wide) |
-| Calls that trained but ended with no mm_manager traffic | Shim (call ended by idle timer with 0 bytes from mm_manager) | Any |
-| datamodem training failures | datamodem INFO log (`NOCARRIER`-type outcomes) | Several in a row from one terminal's ATA |
-| Missed expected call-in | Last call-in time per terminal (mm_manager log or `mm_manager.db`) against its call-in schedule | Past the schedule plus one retry interval: switch that terminal to `MM_MODEM=bell` (§3.6) |
+| Signal | Source | Carried as | Alarm when |
+|---|---|---|---|
+| `mm-modem` reachable | Asterisk AOR `qualify_frequency` on the datamodem endpoint | Host monitoring (not a PIV event: `mm-termcfg` does not read Asterisk) | Unreachable for more than 2 minutes (lost registration or crash) |
+| Calls refused, by reason | Shim | PIV `modem.call.refused.v1`, `refusal_reason` (`VOCABULARY.md` §6.6) | Any `no_reader` or `peer`; `cooldown` more than 3 per hour (M1 window too wide) |
+| Calls that trained but ended with no mm_manager traffic | Shim (call ended with 0 bytes from mm_manager) | PIV `modem.call.ended.v1` with `dte_silent: true` | Any |
+| datamodem training failures | datamodem INFO log (`NOCARRIER`-type outcomes); the shim never sees these, because datamodem runs `--exec` only after training | Host monitoring | Several in a row from one terminal's ATA |
+| Missed expected call-in | `last_session_ts` from `tables/<terminal_id>/terminal.json` (ADR-0001 F1), against the terminal's `expected_callin_interval_secs` | PIV `terminal.callin.missed.v1`, emitted by `mm-termcfg` | Past the interval plus one retry interval: switch that terminal to `MM_MODEM=bell` (§3.6) |
 
-Events go out through ADR-0001's event relay (`mm-termcfg`). The shim
-itself makes no network calls: a log shipper or the relay reads its
-counters.
+Why `terminal.json` and not `mm_manager.db`: `mm-termcfg` never opens
+mm_manager's database, which holds masked PANs (ADR-0001 review A-18).
+`terminal.json` also sits in the shared table store, so it covers both
+mm_manager instances (§3.6) without merging two databases. Until F1 is
+built, the operator reads the last call-in from each instance's log.
+
+**Event path.** The shim makes no network calls. Like the bridge
+(`docs/wapi-bridge/SPEC.md` §3.2 item 4), it appends each event to a
+local spool, `/var/spool/mm-softmodem/events/`: directory 0750, files
+0640, owner `mm-modem`, group the relay. Each event is checked against
+the PIV schema before it is written. A full spool drops the event and
+counts the drop; it never blocks or refuses a call. `mm-termcfg`'s relay
+reads this spool alongside the bridge's (`docs/wapi-bridge/SPEC.md` §9)
+and delivers events under the same rules, including the Luhn scan of
+every string value. The shim's events name a `modem_id`, not a terminal.
+The shim does not know which terminal is calling: it receives no caller
+id (§4.2), and mm_manager learns the terminal id only after `CONNECT`.
+Per-call byte counts stay in the shim's local log (§4.4) and are not
+put in events.
 
 ## 5. Call flow
 
@@ -423,15 +502,15 @@ PIN over its line whatever modem answers (`THREAT_MODEL.md`, "Wire
 to/from terminal"). What is new is that the line is now packets on a
 network and processes on a host.
 
-| ID | Control | Rule | Verified by |
-|---|---|---|---|
-| C-1 | Voice LAN/VLAN isolated: only the ATA(s), Asterisk, and the payphone host. No route from general LAN or Internet to the RTP range or SIP port. datamodem and Asterisk bind there or to loopback (`bind-addr`). RTP is treated as clear text: SRTP was not verified for datamodem. | 5 (spirit), threat model | Network diagram in deployment notes; `ss -lunp` shows no wildcard binds |
-| C-2 | datamodem `log-level` at most `info`; `DATAMODEM_RECORD` never set (systemd `UnsetEnvironment=DATAMODEM_RECORD`). A debug run is allowed only with test cards, and its log is deleted after use. | 4 | Unit-file review; T-5 decode check |
-| C-3 | No Asterisk recording, monitoring, or `core set debug` capture on the `mm-modem` route in production. | 4 | Dialplan review |
-| C-4 | Shim never logs payload (§4.4); socket 0600 in a 0700 dir; `SO_PEERCRED` uid check; PTY slave and its symlink directory group `mm-dte` (the shim's and mm_manager's users only), mode 0660. | 2, 3, 4 | T-2 tests; `ls -l` checks in T-4 |
-| C-5 | Processes run as dedicated users: `mm-modem` (datamodem and shim), the existing mm_manager user. Neither can read the bridge's credentials. | 8 | Unit files |
-| C-6 | Only `from-payphone` can reach `mm-modem` and `mm-bell`. Anything that reaches the modem can act as a terminal (ADR-0001 review A-1); the bridge allow-list and attempt limits (ADR-0001 W1) remain the card-side control. | ADR-0001 W1 | Dialplan review; attempt from another endpoint is rejected (T-4) |
-| C-7 | datamodem and shim process memory holds clear PAN/PIN in transit, the same class as mm_manager's (`THREAT_MODEL.md` "Process memory"). No core dumps for either (`LimitCORE=0`). | 2, 3 | Unit files |
+| ID | Control | Rule | Verified by | `THREAT_MODEL.md` |
+|---|---|---|---|---|
+| C-1 | Voice LAN/VLAN isolated: only the ATA(s), Asterisk, and the payphone host. No route from general LAN or Internet to the RTP range or SIP port. datamodem and Asterisk bind there or to loopback (`bind-addr`). RTP is treated as clear text: SRTP was not verified for datamodem. | 5 (spirit), threat model | Network diagram in deployment notes; `ss -lunp` shows no wildcard binds | Sink "Wire to/from terminal" (now packets); new sink "RTP audio" |
+| C-2 | datamodem `log-level` at most `info`; `DATAMODEM_RECORD` never set (systemd `UnsetEnvironment=DATAMODEM_RECORD`). A debug run is allowed only with test cards, and its log is deleted after use. | 4 | Unit-file review; T-5 decode check | New sink "datamodem logs and call recordings"; same class as the open G2 sinks (`-l`, `-p`) |
+| C-3 | No Asterisk recording, monitoring, or `core set debug` capture on the `mm-modem` route in production. | 4 | Dialplan review | New sink "datamodem logs and call recordings" |
+| C-4 | Shim never logs payload (§4.4); socket 0600 in a 0700 dir; `SO_PEERCRED` uid check; PTY slave and its symlink directory group `mm-dte` (the shim's and mm_manager's users only), mode 0660. | 2, 3, 4 | T-2 tests; `ls -l` checks in T-4 | New sink "Shim socket and PTY"; boundary 1 |
+| C-5 | Processes run as dedicated users: `mm-modem` (datamodem and shim) and the mm_manager user of ADR-0001 §3.2. `mm-modem` cannot reach the bridge's socket or read its secrets (§3.7). What the mm_manager user may read is set by ADR-0001, not here. | 8 | Unit files; `sudo -u mm-modem` cannot open the bridge socket (T-4) | Boundary 2 (card plane stays between mm_manager and the bridge); sink "Bridge request" |
+| C-6 | Only `from-payphone` can reach `mm-modem` and `mm-bell`. Anything that reaches the modem can act as a terminal (ADR-0001 review A-1); the bridge allow-list and attempt limits (ADR-0001 W1) remain the card-side control. | ADR-0001 W1 | Dialplan review; attempt from another endpoint is rejected (T-4) | Boundary 1 (`terminal_id` is a claim); abuse cases on crafted packets |
+| C-7 | datamodem and shim process memory holds clear PAN/PIN in transit, the same class as mm_manager's (`THREAT_MODEL.md` "Process memory"). No core dumps for either (`LimitCORE=0`). | 2, 3 | Unit files | Sink "Process memory / stack buffers" |
 
 Rows to add to `THREAT_MODEL.md` when this is built:
 
@@ -440,6 +519,12 @@ Rows to add to `THREAT_MODEL.md` when this is built:
 | RTP audio on the voice network | Modulated PAN/PIN (decodable) | C-1 |
 | datamodem logs and call recordings | Line data at `debug`/`trace`; audio if `DATAMODEM_RECORD` set | C-2, C-3 |
 | Shim socket and PTY | Clear PAN/PIN in transit | C-4, C-5 |
+| Shim event spool (§4.5) | S1 only: `modem_id`, reasons, durations | Schema check before write; relay's Luhn scan (`docs/wapi-bridge/SPEC.md` §9); T-5 decode check covers the spool |
+
+And a refinement of trust boundary 1: on the soft route the "phone
+line" is ATA, voice network, datamodem and the shim. Each is a point
+where line data exists in clear form. None of them adds trust:
+`terminal_id` is still only a claim, checked by the bridge allow-list.
 
 ## 8. Licence and supply chain
 
@@ -470,8 +555,8 @@ Rows to add to `THREAT_MODEL.md` when this is built:
 | T-6 | **Real mm_manager against the shim** (design review M2): start the built `mm_manager -m -w -f <shim PTY>` and a fake caller on the socket that sends terminal-side bytes from a synthetic fixture (test PAN only). Then end the call abnormally, and place a second call after the cooldown. | mm_manager's own init succeeds through the shim (its termios, including `CRTSCTS`, on a PTY); it logs "Connected!" and handles the first packet; after the abnormal end it returns to "Waiting for call" before the cooldown ends; the second call connects |
 | T-7 | MODEM table tool round trip (design review L2): generate `mm_table_21.bin` from named fields, decode it against Nortel MSR 2.1's field list, and compare with `tables/default/mm_table_21.bin` | With default inputs, the output is byte-identical to the default file; with "answer tone not required", only byte 33 differs (`0x02` -> `0x06`) |
 | T-3 | Transport through the real chain without a terminal: a second datamodem (`dial <manager number> --modulation v22 --no-step-down --v42 off --exec <script>`) registered as a test endpoint in `from-payphone` sends a fixed 4 KiB pattern; a test reader on the PTY echoes it back | Pattern returns byte-exact; shim logs counts 4096/4096 |
-| T-4 | Negative routing and permissions: same test endpoint placed in another context cannot reach `mm-modem`; `stat` of socket, directory, and PTY shows §4.2/C-4 modes | Call rejected; modes as specified |
-| T-5 | Leak check after T-3 with a pattern containing test PAN `4012888888881881` and a dummy PIN, decoded per rule 9 (ASCII and packed-BCD forms) over the datamodem log, journald for all three units, and the shim log | No match |
+| T-4 | Negative routing and permissions: same test endpoint placed in another context cannot reach `mm-modem`; `stat` of socket, directory, and PTY shows §4.2/C-4 modes; as `mm-modem`, opening the bridge socket fails | Call rejected; modes as specified; bridge socket refused |
+| T-5 | Leak check after T-3 with a pattern containing test PAN `4012888888881881` and a dummy PIN, decoded per rule 9 (ASCII and packed-BCD forms) over the datamodem log, journald for all three units, the shim log and the shim event spool | No match |
 
 ### 9.2 Hardware (to add to `HARDWARE_TEST_PLAN.md` as section 4)
 
