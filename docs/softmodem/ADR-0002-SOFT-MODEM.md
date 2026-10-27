@@ -1,6 +1,6 @@
 # ADR-0002: Soft modem for terminal dial-in (datamodem)
 
-- **Status**: Proposed, 2026-10-26. Owner decisions DS-1 to DS-4 open.
+- **Status**: Proposed, 2026-10-26. Owner decisions DS-1 to DS-5 open.
 - **Scope**: the modem leg between a Nortel Millennium terminal and
   mm_manager, on the payphone host. No change to `src/`; no change to the
   card path or to the decisions in `AI/CARDMAN_CONTEXT.md` or ADR-0001.
@@ -89,6 +89,89 @@ come from the GitHub API on the same day.
   ([Bell 212A](https://en.wikipedia.org/wiki/Bell_212A)) and gives no
   detail. Whether a Millennium's 212A originate side accepts a V.22
   answerer is therefore **unknown and can only be settled on hardware**.
+
+### The Millennium's own modem (cross-reference, 2026-10-26)
+
+Sources: Nortel manuals in
+[muccc/millennium](https://github.com/muccc/millennium) @ `a70a19e`
+(`documentation/`); upstream issues on
+[hharte/mm_manager](https://github.com/hharte/mm_manager/issues); and the
+TDK/Teridian 73K222AL datasheet (Rev 6.0, 2005, the closest published
+sibling of the terminal's 73K212). Text was extracted from the PDFs with
+a stdlib script; nothing was run from those repositories.
+
+- **Modulation is Bell 212A only.** "The modem signals using Bell 212A
+  1200 bps Differential Phase Shift Keying (DPSK) standard protocol"
+  (Nortel *Millennium desk terminal general specification* GS5U10,
+  issue 00.02, Feb 1997, "Modem signaling").
+- **Two different modem chips ship on control boards.** An owner
+  reported a **73K324L-28IH** on the surface-mount board and a
+  **73K212ASL-IP** on the "rev01" board. A Rockwell modem (Supra 288,
+  `ATB1`) handshook with the first and "Won't handshake at all" with the
+  second, while a Conexant (Lenovo 56K) modem worked with both
+  ([hharte/mm_manager#3](https://github.com/hharte/mm_manager/issues/3)).
+  The upstream maintainer replied that he had not known the two board
+  revisions behaved differently.
+- **What those chips can hear.** Per the 73K222AL datasheet, it "is an
+  enhancement of the 73K212L/AL single-chip modem which adds V.22 and
+  V.21 modes to the Bell 212A and 103 operation of the 73K212AL". The
+  family's detect register says "Answer Tone Detect: Indicates
+  detection of 2225 Hz answer tone in Bell mode or 2100 Hz in CCITT
+  mode", in originate mode. The 73K324L lists "V.22bis, V.22, V.21, V.23
+  and Bell 212A" ([73K324L datasheet](https://pdf.jiepei.com/73k324l-16665277.html)).
+  **So a 73K212-based terminal has no CCITT mode and cannot detect
+  datamodem's 2100 Hz tone at all.** A 73K324L terminal could only if
+  its firmware puts the chip in CCITT mode, which a Bell-only spec
+  makes unlikely. The chips also report "Unscrambled Mark Detect" (more
+  than 165.5 ms of unscrambled marks) and "Carrier Detect", and the
+  host microcontroller runs the handshake from these detector bits.
+- **The terminal's firmware lets the manager turn off the answer-tone
+  requirement.** The MODEM table (DLOG `0x21`, "Modem Configuration
+  Parameters") in Nortel's *Millennium Database Design Report MSR 2.1*
+  (`documentation/manager/A0xxxxxx_00_02.pdf`, pp. 2-279 to 2-289) has
+  these fields:
+  - **ENABLE ANSWER TONE DETECT**: default `1`; `0` = "No detection of
+    (or looking for) answer tone";
+  - **ANSWER TONE NOT REQUIRED**: default `0`; `1` = "Yes - answer tone
+    is NOT required (use carrier only)". It "Indicates whether an answer
+    tone is required before proceeding with a data call";
+  - answer-tone and carrier-mark debounce counts, **DELAY AFTER CARRIER
+    MARK DET** (default 500, in 10 ms units, so 5 s), and ENABLE CARRIER
+    LOST TIMEOUT.
+- **mm_manager already sends this table.** `DLOG_MT_MODEM_PARMS` is in
+  its download lists (`src/mm_manager.c` L72, L118, L163, L196, L229),
+  from `tables/<terminal_id>/mm_table_21.bin`, or else
+  `tables/default/mm_table_21.bin` (L1426-1429). The 35-byte default
+  file decodes field by field against the report's field order, and
+  every value equals the documented default except CARRIER LOST DEB OFF
+  CNT (`0x64` = 100 against a documented 3). Its byte 33, the
+  answer-tone config bits, is **`0x02`**: detection enabled, answer tone
+  **required**. The bit order (bit 0 spare, bit 1 enable detect, bit 2
+  not required) is inferred from the report's field order and the
+  defaults. It has not been tested on hardware.
+- **Answer supervision is a precondition for any VoIP line.** The
+  terminal needs polarity reversal on answer; without it, a Conexant
+  modem behind a Grandstream HT802 saw "Carrier lost" and the terminal
+  showed Error 51 until polarity reversal was enabled
+  ([hharte/mm_manager#25](https://github.com/hharte/mm_manager/issues/25);
+  upstream `README.md`, "Phone Line").
+
+**What this means for the decision:**
+
+- Under the default MODEM table, datamodem's V.22 answer is expected to
+  **fail** on a 73K212 board: answer tone is required, and that chip
+  cannot detect 2100 Hz. It may fail on a 73K324L board too.
+- Sending a MODEM table with ANSWER TONE NOT REQUIRED (byte 33 = `0x06`)
+  should let the terminal proceed on carrier alone. That is a
+  terminal-side table change, not a modem change.
+- **Bootstrap problem:** the terminal applies a new MODEM table only
+  after a successful call-in has downloaded it. Its settings before the
+  first download are unknown, and probably the documented defaults. So
+  the first call-in to a factory-fresh terminal may still need a 2225
+  Hz answerer: a hardware modem, or el-modem.
+- What happens after carrier is detected with a V.22 (rather than Bell)
+  answerer is still unknown. The terminal's firmware decides from the
+  unscrambled-mark and carrier bits, and only hardware will show it.
 
 **Finding (first pass): no candidate that passes G1 sends the Bell
 2225 Hz answer tone at 1200 bit/s.** The third pass (below) found two
@@ -263,10 +346,20 @@ record its SHA-256 in their deployment notes (`SPEC.md` §8).
 
 **S4. Bell 212A compatibility is a hardware gate, and the hardware
 modem stays supported.** Before any reliance on the soft modem, the
-hardware session runs the answer-tone matrix in `SPEC.md` §9.2
-(SM-1 to SM-3): datamodem's default 2100 Hz tone, then no tone
-(`--answer-tone-ms 0`, straight to the 2400 Hz carrier). Only if both
-fail, it tries a real Bell 2225 Hz answer (SM-3), in this order: a
+hardware session first records which modem chip the terminal has (SM-0:
+73K212 or 73K324L). It then runs the answer-tone matrix in `SPEC.md`
+§9.2:
+
+- SM-1: datamodem's default 2100 Hz tone with the default MODEM table
+  (expected to fail on a 73K212; recorded as the baseline);
+- SM-1b: the same, after a call-in has downloaded a per-terminal MODEM
+  table with ANSWER TONE NOT REQUIRED (see "The Millennium's own
+  modem");
+- SM-2: no tone (`--answer-tone-ms 0`, straight to the 2400 Hz carrier),
+  with that table.
+
+Only if these fail, it tries a real Bell 2225 Hz answer (SM-3), in this
+order: a
 datamodem release with U2 if one exists by then; otherwise el-modem's
 `AT+MS=B212` profile, on an x86-64 host, with `EL_MODEM_RECORDING=0`
 enforced and the SPEC §7 controls applied to it (DS-4). If none of them
@@ -310,6 +403,7 @@ repo does not carry patches to datamodem.
 | DS-1 | Accept a GPL-3.0-or-later component on the payphone host, at a process boundary only (S3)? | Yes. Nothing from it is linked into or shipped with this fork. |
 | DS-2 | Shim language: Python (like `tools/cardman_bridge.py`) or C (like `src/`)? | Python: stdlib `pty`, `socket` and `selectors` only, no third-party packages, same review style as the bridge. |
 | DS-3 | Raise U2 (Bell answer tone) upstream before the hardware session, or only if SM-1 and SM-2 fail? | Raise it now, pointing at the v90modem LGPL reference. That costs nothing and may land before the session. |
+| DS-5 | For soft-modem terminals, send a per-terminal MODEM table (`tables/<terminal_id>/mm_table_21.bin`) with ANSWER TONE NOT REQUIRED, bootstrapped by one call-in through a 2225 Hz answerer (hardware modem or el-modem)? | Yes, per terminal and never in `tables/default`, so hardware-modem terminals keep the Nortel default. Generate the file with a small table tool rather than by hand-editing bytes. |
 | DS-4 | If SM-1 and SM-2 fail and no datamodem U2 release exists, try el-modem for SM-3 on an x86-64 host? | Yes, for the test only. Adopt it in production only if it passes SM-1 to SM-8, recording is verified off (SM-8 decode check over its capture directory), and its provenance review (#14) is accepted. |
 
 ## Consequences

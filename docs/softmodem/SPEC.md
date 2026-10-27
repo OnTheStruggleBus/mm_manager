@@ -64,6 +64,26 @@ a modem call fails over VoIP (datamodem README "What the call needs"):
 | T.38 / fax re-INVITE | Off | Would replace the audio path mid-call. |
 | Dial plan | Pass the terminal's dialled manager number through unchanged | Asterisk routes on it. |
 | Registration | To Asterisk, as its own endpoint (`payphone-ata-<n>`) | Lets §3.2 restrict who can reach the modem. |
+| Answer supervision | **Polarity reversal on answer: on** | The terminal needs it. Without it, a Conexant modem behind an HT802 saw "Carrier lost" and the terminal showed Error 51 ([hharte/mm_manager#25](https://github.com/hharte/mm_manager/issues/25); upstream README "Phone Line"). |
+
+### 3.1a Terminal MODEM table (DLOG `0x21`)
+
+The terminal's own modem is a TDK/Silicon Systems 73K212 (Bell
+212A/103 only) or 73K324L, depending on the control board. Its firmware
+needs an answer tone unless told otherwise (ADR-0002 "The Millennium's
+own modem"). For a soft-modem terminal, mm_manager sends a per-terminal
+`tables/<terminal_id>/mm_table_21.bin` (DS-5), identical to
+`tables/default/mm_table_21.bin` except:
+
+| Offset | Field (Nortel MSR 2.1 p. 2-288/289) | Default | Soft-modem value |
+|---|---|---|---|
+| 33 | Answer-tone config byte: bit 1 ENABLE ANSWER TONE DETECT, bit 2 ANSWER TONE NOT REQUIRED (bit order inferred) | `0x02` | `0x06` (detect if present, proceed on carrier) |
+
+Bootstrap: the terminal uses this only after a successful call-in has
+downloaded it. Do the first install through a 2225 Hz answerer (the
+hardware modem, or el-modem per DS-4), then move the terminal to
+datamodem. A small generator script, not hand-edited bytes, should
+produce the file. It belongs with the SM-P1 task card.
 
 ### 3.2 Asterisk
 
@@ -363,8 +383,10 @@ Rows to add to `THREAT_MODEL.md` when this is built:
 
 | # | Test | Do | Pass when | If it fails |
 |---|---|---|---|---|
-| SM-1 | V.22 answer, default tone | `answer-tone-ms = 3300`. 10 consecutive terminal call-ins (craft "call manager"). | 10/10 reach `CONNECT` and complete the session; datamodem's `carrier established` line shows `modulation=v22 rate=1200` (`src/modem.c` L1966) | Go to SM-2. Keep one datamodem audio recording **of a call-in with no card traffic**, made with the terminal's craft call-in and deleted after analysis, as evidence for U2. |
-| SM-2 | V.22 answer, no tone | `answer-tone-ms = 0`, so the 2400 Hz answer carrier starts at once. 10 call-ins. | 10/10 as SM-1 | Go to SM-3. |
+| SM-0 | Identify the terminal's modem | Open the terminal; record the control board revision, the modem chip marking (73K212 or 73K324L), and the firmware from `DLOG_MT_SW_VERSION`. | Recorded | — |
+| SM-1 | V.22 answer, default tone, default MODEM table | `answer-tone-ms = 3300`, terminal on the default `mm_table_21.bin`. 10 consecutive call-ins (craft "call manager"). Expected to fail on a 73K212, which cannot detect 2100 Hz. | 10/10 reach `CONNECT` and complete the session; datamodem's `carrier established` line shows `modulation=v22 rate=1200` (`src/modem.c` L1966) | Record the result, then go to SM-1b. |
+| SM-1b | V.22 answer, MODEM table "answer tone not required" | Install once through a 2225 Hz answerer (hardware modem) with the §3.1a per-terminal table, confirm the terminal ACKs table `0x21`, then move it to datamodem. `answer-tone-ms = 3300`. 10 call-ins. | 10/10 as SM-1 | Go to SM-2. Keep one datamodem audio recording **of a call-in with no card traffic**, made with the terminal's craft call-in and deleted after analysis, as evidence for U2. |
+| SM-2 | V.22 answer, no tone | With the SM-1b table, `answer-tone-ms = 0`, so the 2400 Hz answer carrier starts at once. 10 call-ins. | 10/10 as SM-1 | Go to SM-3. |
 | SM-3 | Bell 2225 Hz answer | A datamodem release with U2 if one exists. Otherwise el-modem (ADR-0002 #14, DS-4) on an x86-64 host: `EL_MODEM_RECORDING=0`, PTY backend, `AT+MS=B212,0`, no shim. Run mm_manager with `-m -w -i "ATS0=1S7=3&D2+MS=B212,0"`, since el-modem rejects `ATE=1`. 10 call-ins. | 10/10 as SM-1, and el-modem's capture directory is empty afterwards | Soft modem not supported on this terminal (ADR-0002 S4); record the result. |
 | SM-4 | Full install session | With the passing SM-1/2/3 setting: a terminal install (all tables down). | Completes; duration within 25% of the hardware-modem baseline for the same table set | Jitter or loss on the path (§6). |
 | SM-5 | Card call end to end | `HARDWARE_TEST_PLAN.md` 3.1 over the soft modem (needs test cards: the blocker in `docs/wapi-bridge/SPEC.md` §14.1). | As 3.1 | Compare with the hardware modem on the same day to separate modem from card path. |
@@ -376,10 +398,10 @@ Rows to add to `THREAT_MODEL.md` when this is built:
 
 | Phase | Work | Gate |
 |---|---|---|
-| SM-P0 | Owner decisions DS-1 to DS-3 | Recorded in ADR-0002 |
+| SM-P0 | Owner decisions DS-1 to DS-5 | Recorded in ADR-0002 |
 | SM-P1 | Shim + T-2 (new task card in `AI/TASKS.md`) | T-2 green in CI; security checklist in `SECURITY_RULES.md` passes review |
 | SM-P2 | Lab: ATA + Asterisk + datamodem + shim, T-1, T-3 to T-5 | All pass |
-| SM-P3 | Hardware SM-1 to SM-8, alongside the existing hardware session | SM-1 or SM-2 (or SM-3) 10/10, and SM-4 to SM-8 pass |
+| SM-P3 | Hardware SM-0 to SM-8, alongside the existing hardware session | SM-1, SM-1b or SM-2 (or SM-3) 10/10, and SM-4 to SM-8 pass |
 | SM-P4 | Docs: `COMPATIBILITY_PLAN.md` §1/§5 final, `THREAT_MODEL.md` rows, README section "Using a soft modem" | Merged |
 
 If SM-P3 fails at the answer-tone matrix, stop at SM-P3. The hardware
