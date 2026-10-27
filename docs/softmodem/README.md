@@ -8,6 +8,7 @@ Docs only; nothing here is built yet.
 |---|---|
 | [`ADR-0002-SOFT-MODEM.md`](ADR-0002-SOFT-MODEM.md) | Selection criteria, the evidence (nineteen candidates checked against their source and licence files, across three search passes), the decision (datamodem, standalone, behind a fork-side DTE shim), owner decisions DS-1 to DS-5, and the design review (H1-H2, M1-M4, L1-L2, all dispositioned). Start here. |
 | [`SPEC.md`](SPEC.md) | Topology, ATA/Asterisk/datamodem configuration, the `mm-softmodem-dte` shim contract, call flow, instances/migration/recovery (§3.6), placement next to the WAPI bridge (§3.7), shim states incl. `COOLDOWN`, health signals as PIV events (§4.5), security controls C-1 to C-7 mapped to `THREAT_MODEL.md`, licence and supply chain, tests T-1 to T-7 and hardware checks SM-0 to SM-10, phasing (U2 on the critical path), upstream requests U1-U3. |
+| [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | Draft build plan: review of the SPEC against `src/` (confirmations and gaps P-1 to P-8), task cards SM-T0 to SM-T10 and SM-TU, sequencing into milestones M1 to M4, test map, risks. |
 
 Key finding: datamodem, the selected modem, answers V.22 with the 2100
 Hz tone, not Bell 212A's 2225 Hz, so whether the Millennium accepts it
