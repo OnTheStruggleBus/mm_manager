@@ -19,7 +19,7 @@ this roadmap. Phases below name the pre-work item they wait on.
 Nortel Millennium terminal
    |  1200 baud Bell 212A dial-in
    v
-[ hardware modem ]  or  [ Asterisk app_softmodem -> TCP -> socat PTY ]   (SOW Phase 3)
+[ hardware modem ]  or  [ ATA -> Asterisk -> datamodem -> mm-softmodem-dte PTY ]   (docs/softmodem, ADR-0002)
    |  serial / PTY  (-f <dev> -m)
    v
 mm_manager  (CARDMAN build: MM_CARDMAN=ON)
@@ -243,8 +243,8 @@ any live CARDMAN test (P5).
 - Acceptance: as listed under O1 and O2; contract tests run in CI.
 
 ### P5. End-to-end and release
-- Integration repo SOW Phase 3 (softmodem + PTY) and a live CARDMAN dev
-  instance.
+- Soft modem path per `docs/softmodem/` (ADR-0002, replaces integration
+  repo SOW Phase 3's softmodem + PTY), and a live CARDMAN dev instance.
 - Release artifact: `Linux-x64-static` built with `MM_CARDMAN=ON`.
 - Upstream sync procedure documented (merge upstream, re-run P4).
 - Gate: O2 item 7 live verification passes; full dial-in -> auth ->
@@ -268,7 +268,7 @@ any live CARDMAN test (P5).
 |---|---|---|
 | Terminal does not re-send un-ACKed CDRs (D1a fails) | No compliant way to retain the CDR | Verify on hardware in P0. If it fails, return D1 to the owner; any local store needs a `SECURITY_RULES.md` amendment first. |
 | Packed timestamp/duration encodings wrong (open item in `CDR_CONTRACT_SCOPING.md`) | Wrong charges | Confirm against a real capture in P0 before P2. |
-| `app_softmodem` cannot demodulate this terminal | No softmodem path | Hardware modem path already works; softmodem is optional for compatibility. |
+| No open soft modem sends the Bell 212A answer tone (2225 Hz); the terminal may reject a V.22 answerer | No softmodem path | Hardware answer-tone matrix SM-1 to SM-3 (`docs/softmodem/SPEC.md` §9.2) before any reliance; hardware modem path already works and stays supported (ADR-0002 S4). |
 | Upstream changes `process_mm_table()` heavily | Rebase conflicts | Keep CARDMAN logic in new files; case blocks call one function each. |
 | Redaction misses a table type | Card data leak | Redactor keyed on table IDs with tests per ID; default to redacting any table containing a card-number field. |
 
