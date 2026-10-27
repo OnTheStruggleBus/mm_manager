@@ -44,6 +44,10 @@ mm_manager -m -w -f /run/mm-softmodem/ttyMM ...   (unchanged binary)
 mm-bridge -> CARDMAN
 ```
 
+Until U2 ships, Asterisk can instead route a terminal to a 2225 Hz
+answerer (`mm-bell`: hardware modem or el-modem) feeding a second
+mm_manager instance, for bootstrap and recovery (§3.2, §3.6).
+
 Process and licence boundaries are the arrows: nothing in the chain is
 linked to anything else in it (ADR-0002 S3).
 
@@ -109,12 +113,29 @@ fax_detect = no
 direct_media = no
 ```
 
+Each payphone ATA endpoint also carries which modem its terminal uses
+(ADR-0002 S7). This is the bootstrap route, the migration switch and the
+rollback:
+
+```ini
+; pjsip.conf, on each [payphone-ata-<n>] endpoint
+set_var = MM_MODEM=soft          ; or MM_MODEM=bell: hardware modem / el-modem (2225 Hz)
+
+[mm-bell]                        ; the 2225 Hz answerer, e.g. a hardware modem on an ATA FXS port
+type = endpoint
+context = no-outbound
+allow = !all,ulaw
+```
+
 ```ini
 ; extensions.conf
 [from-payphone]
 ; <manager number> is what the terminal was installed with (README, "Key
-; in the Manager's phone number"). Only this context reaches mm-modem.
-exten => <manager number>,1,Dial(PJSIP/mm-modem,30)
+; in the Manager's phone number"). Only this context reaches the modems.
+exten => <manager number>,1,GotoIf($["${MM_MODEM}" = "bell"]?bell)
+ same => n,Dial(PJSIP/mm-modem,30)
+ same => n,Hangup()
+ same => n(bell),Dial(PJSIP/mm-bell,30)
  same => n,Hangup()
 
 [no-outbound]
@@ -123,7 +144,9 @@ exten => _X.,1,Hangup()
 
 Rules:
 
-- `mm-modem` is reachable from `from-payphone` only. No other context,
+- An unset `MM_MODEM` routes to datamodem. Set `bell` for a terminal's
+  bootstrap and for recovery (§3.6).
+- `mm-modem` and `mm-bell` are reachable from `from-payphone` only. No other context,
   trunk, or extension may route to it (§7, C-6).
 - No `JITTERBUFFER()`, no `MixMonitor`/`Monitor`, and no call recording
   on this route: a recording of the audio is a decodable card-data sink
@@ -182,6 +205,13 @@ table). Flags behave as documented in the datamodem README, sections
 needs". The environment must never contain `DATAMODEM_RECORD`
 (`src/modem.c` L2482 reads it to record call audio).
 
+Capacity: datamodem takes one call at a time and answers a second with
+`486 Busy Here` (README "Answering for a BBS"). A terminal that gets
+busy retries according to its call-in parameters. Run one datamodem,
+shim and mm_manager set per simultaneous call-in you expect. Each set
+needs its own SIP account, `local-port`, RTP range, socket, PTY and
+working directory.
+
 ### 3.4 `mm-softmodem-dte` (new, this repo)
 
 `tools/mm_softmodem_dte.py`, MIT, Python 3 stdlib only (`pty`, `os`,
@@ -218,6 +248,36 @@ mm_manager -m -w -f /run/mm-softmodem/ttyMM -n <ncc number> [usual options]
 - `-b` is irrelevant on a PTY (the default 19200 passes the
   `baudrate < 1200` check).
 
+### 3.6 Instances, migration and recovery
+
+One mm_manager per modem (ADR-0002 S7). Each runs in its own working
+directory, so each gets its own `mm_manager.db` (`src/mm_manager.c`
+L587). Both share the table directories and the bridge:
+
+| Instance | Working dir | Modem device | Flags |
+|---|---|---|---|
+| `mm-manager-soft` | `/var/lib/mm-manager/soft` | `/run/mm-softmodem/ttyMM` (shim) | `-m -w -d /opt/mm/tables/default -t /opt/mm/tables` |
+| `mm-manager-bell` | `/var/lib/mm-manager/bell` | hardware modem tty (or el-modem's PTY, with its `-i`) | `-m -d /opt/mm/tables/default -t /opt/mm/tables` (plus `-w` on a PTY) |
+
+A terminal is routed to one modem at a time (§3.2), so the two
+instances never write the same `tables/<terminal_id>/` at once.
+
+**Moving a terminal to the soft modem (interim, until U2):**
+
+1. Set `MM_MODEM=bell` on the terminal's ATA endpoint.
+2. Generate `tables/<terminal_id>/mm_table_21.bin` with the table tool
+   (§3.1a, T-7).
+3. Have the terminal call in for a table update, and confirm in
+   `tables/<terminal_id>/table_update.log` that table `0x21` was ACKed.
+4. Remove `MM_MODEM` (the soft route) and do one test call-in.
+
+**Rollback or recovery:** set `MM_MODEM=bell` again. Use it when a
+terminal misses its expected call-in (§4.5), for example after it has
+lost its downloaded MODEM table. Once a datamodem release with U2 is
+deployed, steps 1-3 and the `bell` route are no longer needed for new
+terminals. Keep `mm-bell` until every terminal has proven it can call in
+on U2.
+
 ## 4. Interface contracts
 
 ### 4.1 Shim to mm_manager (the PTY)
@@ -233,7 +293,20 @@ States:
 |---|---|---|---|
 | `IDLE` | Line-buffered, CR-terminated. A line that matches `^[Aa][Tt][\x20-\x7e]{0,78}$` gets `\r\nOK\r\n`. Anything else gets `\r\nERROR\r\n`. A line over 80 bytes is discarded up to the next CR and answered `ERROR`. No echo. | Only the replies above | A call arrives (§4.2): go to `RINGING` |
 | `RINGING` | Discarded | `\r\nRING\r\n`, then after 100 ms `\r\nCONNECT 1200\r\n` | Immediately to `ONLINE` |
-| `ONLINE` | Every byte, unmodified, to the call socket | Every byte from the call socket, unmodified | Call socket EOF or error; idle timeout (§4.3); shim shutdown. Then close the call socket, wait 1 s of silence, send `\r\nNO CARRIER\r\n`, go to `IDLE` |
+| `ONLINE` | Every byte, unmodified, to the call socket | Every byte from the call socket, unmodified | Call socket EOF or error; idle timeout (§4.3); shim shutdown. Then close the call socket, wait 1 s of silence, send `\r\nNO CARRIER\r\n`, go to `COOLDOWN` |
+| `COOLDOWN` | As `IDLE` (AT lines answered) | As `IDLE` | After `--cooldown` (default 35 s): go to `IDLE`. Calls arriving meanwhile are refused (§4.2). |
+
+Why `COOLDOWN`: with `-w`, mm_manager finds out a session died only
+through protocol timeouts: 3 retries × `PKT_TIMEOUT_MAX` (10) × a 1 s
+read (`VTIME = 10`), about 30 s. During that time it is still in the
+packet loop, not reading result codes. A `RING`/`CONNECT` sent then
+would be thrown away as noise and the call-in lost (design review M1).
+35 s covers that window. A refused caller gets busy and retries. If the
+cooldown proves too slow in SM-6, the fallback is to build without
+`USE_MODEM_DTR` (`src/mm_modem.c` `hangup_modem()`), so mm_manager hangs
+up with `+++`/`ATH` and the shim can treat that as an exact "back in
+command mode" signal. That is a one-line upstream-file change, held in
+reserve.
 
 Why this is enough: mm_manager matches result codes by substring
 (`wait_for_modem_response()`, `strstr` against `modem_responses[]`).
@@ -265,6 +338,7 @@ header for anything mm_manager acts on; it only checks it (§4.2).
     `1200`;
   - the shim is already `ONLINE` (datamodem also answers 486 to a
     second call; this is defence in depth);
+  - the shim is in `COOLDOWN` (§4.1);
   - no process has the PTY slave open (the master reports `POLLHUP`):
     there is no mm_manager to take the call.
 - After the header the stream is raw bytes both ways.
@@ -289,6 +363,24 @@ or lengths of individual reads that could reconstruct framing), AT
 lines (they are harmless today, but logging them invites logging
 everything on the PTY), or anything from the call socket after the
 header. There is no debug flag that changes this (rule 4).
+
+### 4.5 Health signals and alarms
+
+Without these, every failure on this path shows up only as a terminal
+Error 24 in the field (design review M3). Every signal is a count or a
+state, never line data (S0 in ADR-0001's vocabulary):
+
+| Signal | Source | Alarm when |
+|---|---|---|
+| `mm-modem` reachable | Asterisk AOR `qualify_frequency` on the datamodem endpoint | Unreachable for more than 2 minutes (lost registration or crash) |
+| Calls accepted and refused, by reason (`header`, `busy`, `cooldown`, `no_reader`, `peer`) | Shim INFO log, also as counters | Any `no_reader` or `peer`; `cooldown` refusals more than 3 per hour (M1 window too wide) |
+| Calls that trained but ended with no mm_manager traffic | Shim (call ended by idle timer with 0 bytes from mm_manager) | Any |
+| datamodem training failures | datamodem INFO log (`NOCARRIER`-type outcomes) | Several in a row from one terminal's ATA |
+| Missed expected call-in | Last call-in time per terminal (mm_manager log or `mm_manager.db`) against its call-in schedule | Past the schedule plus one retry interval: switch that terminal to `MM_MODEM=bell` (§3.6) |
+
+Events go out through ADR-0001's event relay (`mm-termcfg`). The shim
+itself makes no network calls: a log shipper or the relay reads its
+counters.
 
 ## 5. Call flow
 
@@ -338,7 +430,7 @@ network and processes on a host.
 | C-3 | No Asterisk recording, monitoring, or `core set debug` capture on the `mm-modem` route in production. | 4 | Dialplan review |
 | C-4 | Shim never logs payload (§4.4); socket 0600 in a 0700 dir; `SO_PEERCRED` uid check; PTY slave and its symlink directory group `mm-dte` (the shim's and mm_manager's users only), mode 0660. | 2, 3, 4 | T-2 tests; `ls -l` checks in T-4 |
 | C-5 | Processes run as dedicated users: `mm-modem` (datamodem and shim), the existing mm_manager user. Neither can read the bridge's credentials. | 8 | Unit files |
-| C-6 | Only `from-payphone` can reach `mm-modem`. Anything that reaches the modem can act as a terminal (ADR-0001 review A-1); the bridge allow-list and attempt limits (ADR-0001 W1) remain the card-side control. | ADR-0001 W1 | Dialplan review; attempt from another endpoint is rejected (T-4) |
+| C-6 | Only `from-payphone` can reach `mm-modem` and `mm-bell`. Anything that reaches the modem can act as a terminal (ADR-0001 review A-1); the bridge allow-list and attempt limits (ADR-0001 W1) remain the card-side control. | ADR-0001 W1 | Dialplan review; attempt from another endpoint is rejected (T-4) |
 | C-7 | datamodem and shim process memory holds clear PAN/PIN in transit, the same class as mm_manager's (`THREAT_MODEL.md` "Process memory"). No core dumps for either (`LimitCORE=0`). | 2, 3 | Unit files |
 
 Rows to add to `THREAT_MODEL.md` when this is built:
@@ -374,7 +466,9 @@ Rows to add to `THREAT_MODEL.md` when this is built:
 | # | Test | Pass when |
 |---|---|---|
 | T-1 | `datamodem selftest --modulation v22 --no-step-down` on the target host (command form from datamodem DEVNOTES "Testing") | Exits 0 |
-| T-2 | Shim unit tests (`tools/test_mm_softmodem_dte.py`, stdlib `unittest`), using a real PTY pair and socket: `AT`/`ATZ`/default init string answer `OK`; non-AT and over-long lines answer `ERROR`; a call gives `RING` then `CONNECT 1200`; all 256 byte values pass both ways unchanged; socket EOF gives `NO CARRIER` and `IDLE`; idle timeout closes the call; a second call is refused while `ONLINE`; a call with no PTY reader is refused; a bad header, `mod` or `rate` is refused; a wrong peer uid is refused | All pass; runs in the existing Linux `ctest` step |
+| T-2 | Shim unit tests (`tools/test_mm_softmodem_dte.py`, stdlib `unittest`), using a real PTY pair and socket: `AT`/`ATZ`/default init string answer `OK`; non-AT and over-long lines answer `ERROR`; a call gives `RING` then `CONNECT 1200`; all 256 byte values pass both ways unchanged; socket EOF gives `NO CARRIER` and `IDLE`; idle timeout closes the call; a second call is refused while `ONLINE`; a call during `COOLDOWN` is refused, and one after it is accepted; a call with no PTY reader is refused; a bad header, `mod` or `rate` is refused; a wrong peer uid is refused; refusal counters increment by reason | All pass; runs in the existing Linux `ctest` step |
+| T-6 | **Real mm_manager against the shim** (design review M2): start the built `mm_manager -m -w -f <shim PTY>` and a fake caller on the socket that sends terminal-side bytes from a synthetic fixture (test PAN only). Then end the call abnormally, and place a second call after the cooldown. | mm_manager's own init succeeds through the shim (its termios, including `CRTSCTS`, on a PTY); it logs "Connected!" and handles the first packet; after the abnormal end it returns to "Waiting for call" before the cooldown ends; the second call connects |
+| T-7 | MODEM table tool round trip (design review L2): generate `mm_table_21.bin` from named fields, decode it against Nortel MSR 2.1's field list, and compare with `tables/default/mm_table_21.bin` | With default inputs, the output is byte-identical to the default file; with "answer tone not required", only byte 33 differs (`0x02` -> `0x06`) |
 | T-3 | Transport through the real chain without a terminal: a second datamodem (`dial <manager number> --modulation v22 --no-step-down --v42 off --exec <script>`) registered as a test endpoint in `from-payphone` sends a fixed 4 KiB pattern; a test reader on the PTY echoes it back | Pattern returns byte-exact; shim logs counts 4096/4096 |
 | T-4 | Negative routing and permissions: same test endpoint placed in another context cannot reach `mm-modem`; `stat` of socket, directory, and PTY shows §4.2/C-4 modes | Call rejected; modes as specified |
 | T-5 | Leak check after T-3 with a pattern containing test PAN `4012888888881881` and a dummy PIN, decoded per rule 9 (ASCII and packed-BCD forms) over the datamodem log, journald for all three units, and the shim log | No match |
@@ -384,7 +478,8 @@ Rows to add to `THREAT_MODEL.md` when this is built:
 | # | Test | Do | Pass when | If it fails |
 |---|---|---|---|---|
 | SM-0 | Identify the terminal's modem | Open the terminal; record the control board revision, the modem chip marking (73K212 or 73K324L), and the firmware from `DLOG_MT_SW_VERSION`. | Recorded | — |
-| SM-1 | V.22 answer, default tone, default MODEM table | `answer-tone-ms = 3300`, terminal on the default `mm_table_21.bin`. 10 consecutive call-ins (craft "call manager"). Expected to fail on a 73K212, which cannot detect 2100 Hz. | 10/10 reach `CONNECT` and complete the session; datamodem's `carrier established` line shows `modulation=v22 rate=1200` (`src/modem.c` L1966) | Record the result, then go to SM-1b. |
+| SM-1 | V.22 answer, default tone, default MODEM table | `answer-tone-ms = 3300`, terminal on the default `mm_table_21.bin`. 10 consecutive call-ins (craft "call manager"). Expected to fail on a 73K212, which cannot detect 2100 Hz. | 10/10 reach `CONNECT` and complete the session; datamodem's `carrier established` line shows `modulation=v22 rate=1200` (`src/modem.c` L1966) | Record the result, then go to SM-1a. |
+| SM-1a | Prove the MODEM table bit (design review M4) | On the `bell` route, set the hardware modem to answer **without** an answer tone (for example, a longer `S7` with the answer tone disabled per its manual; record the exact command). Call in with the default table, then download the T-7 "not required" table and call in again. | Default table: no connect. "Not required" table: connects. This proves the byte-33 bit independently of V.22. | If both connect, the terminal does not enforce the tone, so SM-1's result came from something else. If neither connects, the bit order is wrong: fix T-7 before SM-1b. |
 | SM-1b | V.22 answer, MODEM table "answer tone not required" | Install once through a 2225 Hz answerer (hardware modem) with the §3.1a per-terminal table, confirm the terminal ACKs table `0x21`, then move it to datamodem. `answer-tone-ms = 3300`. 10 call-ins. | 10/10 as SM-1 | Go to SM-2. Keep one datamodem audio recording **of a call-in with no card traffic**, made with the terminal's craft call-in and deleted after analysis, as evidence for U2. |
 | SM-2 | V.22 answer, no tone | With the SM-1b table, `answer-tone-ms = 0`, so the 2400 Hz answer carrier starts at once. 10 call-ins. | 10/10 as SM-1 | Go to SM-3. |
 | SM-3 | Bell 2225 Hz answer | A datamodem release with U2 if one exists. Otherwise el-modem (ADR-0002 #14, DS-4) on an x86-64 host: `EL_MODEM_RECORDING=0`, PTY backend, `AT+MS=B212,0`, no shim. Run mm_manager with `-m -w -i "ATS0=1S7=3&D2+MS=B212,0"`, since el-modem rejects `ATE=1`. 10 call-ins. | 10/10 as SM-1, and el-modem's capture directory is empty afterwards | Soft modem not supported on this terminal (ADR-0002 S4); record the result. |
@@ -393,15 +488,18 @@ Rows to add to `THREAT_MODEL.md` when this is built:
 | SM-6 | Terminal hangs up mid-session | Pull the line during a table download. | Shim logs EOF; `NO CARRIER`; next call-in works | Shim state bug. |
 | SM-7 | mm_manager killed mid-call | `kill` mm_manager during a session. | Shim ends the call at once (`POLLHUP`); terminal sees the line drop; after restart the next call-in works | Shim `POLLHUP` handling. |
 | SM-8 | Leak audit | After SM-5, run T-5's decode check over every log on the host. | No match | Blocker (rule 4). |
+| SM-9 | Migration and rollback (§3.6) | Move one terminal bell -> soft by the §3.6 steps, then back to bell, then to soft again. | Every step's call-in completes; `table_update.log` shows `0x21` ACKed; each `mm_manager.db` holds only the sessions routed to it | Routing or instance-separation bug. |
+| SM-10 | Power cycle keeps the MODEM table | Power-cycle a soft-modem terminal (with its normal battery backup in place), then let it call in. | Still calls in on the soft route | It lost the table: rely on the recovery route and the §4.5 alarm, and record it as an operating constraint. |
 
 ## 10. Phasing
 
 | Phase | Work | Gate |
 |---|---|---|
 | SM-P0 | Owner decisions DS-1 to DS-5 | Recorded in ADR-0002 |
-| SM-P1 | Shim + T-2 (new task card in `AI/TASKS.md`) | T-2 green in CI; security checklist in `SECURITY_RULES.md` passes review |
-| SM-P2 | Lab: ATA + Asterisk + datamodem + shim, T-1, T-3 to T-5 | All pass |
-| SM-P3 | Hardware SM-0 to SM-8, alongside the existing hardware session | SM-1, SM-1b or SM-2 (or SM-3) 10/10, and SM-4 to SM-8 pass |
+| SM-P1 | Shim, MODEM table tool, health counters (new task cards in `AI/TASKS.md`); T-2, T-6, T-7 | All green in CI; security checklist in `SECURITY_RULES.md` passes review |
+| SM-PU | **Critical path, in parallel with SM-P1:** prepare U2 in a datamodem fork from the v90modem LGPL reference; `datamodem selftest` against a Bell 212A originator; offer it upstream (DS-3) | Patch offered; a build is available for SM-3 |
+| SM-P2 | Lab: ATA + Asterisk (both routes) + datamodem + shim + both mm_manager instances; T-1, T-3 to T-5; §4.5 alarms fire on a forced registration loss | All pass |
+| SM-P3 | Hardware SM-0 to SM-10, alongside the existing hardware session | SM-1a decides the bit; SM-1, SM-1b or SM-2 (or SM-3) 10/10; SM-4 to SM-10 pass |
 | SM-P4 | Docs: `COMPATIBILITY_PLAN.md` §1/§5 final, `THREAT_MODEL.md` rows, README section "Using a soft modem" | Merged |
 
 If SM-P3 fails at the answer-tone matrix, stop at SM-P3. The hardware
@@ -412,7 +510,7 @@ modem stays the supported path and nothing else in the roadmap changes.
 | ID | Request | Benefit here |
 |---|---|---|
 | U1 | Auto-answer in `datamodem modem --port`: `ATS0=n`, `RING`, `ATA`. The README says today "There is no `ATA`: answering calls is `datamodem answer`." | mm_manager could drive datamodem over a PTY pair directly; the shim retires |
-| U2 | A Bell 212A answer option for V.22: answer with spandsp's `MODEM_CONNECT_TONES_BELL_ANS` (2225 Hz) instead of V.25 ANS. Today only Bell 103 gets it (`src/modem.c` L604-606). A working LGPL-2.1 reference is cryan209/v90modem's change to spandsp `v22bis_tx.c`/`v22bis_rx.c` (ADR-0002 #15). | Closes the one standards gap (ADR-0002 Evidence) if SM-1 and SM-2 fail |
+| U2 | A Bell 212A answer option for V.22: answer with spandsp's `MODEM_CONNECT_TONES_BELL_ANS` (2225 Hz) instead of V.25 ANS. Today only Bell 103 gets it (`src/modem.c` L604-606). A working LGPL-2.1 reference is cryan209/v90modem's change to spandsp `v22bis_tx.c`/`v22bis_rx.c` (ADR-0002 #15). | **Critical path** (ADR-0002 S6). It retires the per-terminal MODEM table, the bootstrap step and the recovery route (S7). |
 | U3 | State in the docs which log levels can contain line data, and keep `info` free of it | Lets C-2 cite a guarantee instead of a review |
 
 Raise U2 with the SM-1 recording attached (DS-3), and include no card
@@ -426,6 +524,9 @@ data in it.
 3. No log, recording, or capture on the host contains a PAN or PIN in
    any decodable form (T-5, SM-8).
 4. Only the payphone ATA's endpoint can reach the modem (T-4).
-5. The hardware modem path still works unchanged (regression: one
+5. A terminal can be moved to the soft route and back, and the missed-call-in
+   alarm fires (SM-9, §4.5).
+6. The hardware modem path still works unchanged (regression: one
    call-in with `-m` on a real modem, without `-w`).
-6. Nothing from datamodem is vendored, built, or shipped by this repo.
+7. Nothing from datamodem is vendored, built, or shipped by this repo. (A U2 patch
+   lives in a datamodem fork.)

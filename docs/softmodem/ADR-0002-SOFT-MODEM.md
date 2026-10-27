@@ -352,6 +352,8 @@ hardware session first records which modem chip the terminal has (SM-0:
 
 - SM-1: datamodem's default 2100 Hz tone with the default MODEM table
   (expected to fail on a 73K212; recorded as the baseline);
+- SM-1a: prove the MODEM table bit on its own, using a hardware modem
+  with its answer tone suppressed;
 - SM-1b: the same, after a call-in has downloaded a per-terminal MODEM
   table with ANSWER TONE NOT REQUIRED (see "The Millennium's own
   modem");
@@ -359,8 +361,8 @@ hardware session first records which modem chip the terminal has (SM-0:
   with that table.
 
 Only if these fail, it tries a real Bell 2225 Hz answer (SM-3), in this
-order: a
-datamodem release with U2 if one exists by then; otherwise el-modem's
+order: a datamodem release (or our patched datamodem build, DS-3) with
+U2; otherwise el-modem's
 `AT+MS=B212` profile, on an x86-64 host, with `EL_MODEM_RECORDING=0`
 enforced and the SPEC §7 controls applied to it (DS-4). If none of them
 connects reliably, the soft modem path is dropped and the hardware
@@ -390,11 +392,36 @@ soft modem.
   `MODEM_CONNECT_TONES_BELL_ANS`. cryan209/v90modem's LGPL-2.1 changes
   to spandsp `v22bis_tx.c`/`v22bis_rx.c` are a working reference for
   it (#15). The same change could be offered to freeswitch/spandsp,
-  where the flag has been declared but unused.
+  where the flag has been declared but unused. **U2 is on the critical
+  path** (design review H1). Without it, every soft-modem terminal
+  depends on a per-terminal MODEM table and a 2225 Hz recovery path
+  (S7). So this project prepares the patch and offers it upstream,
+  rather than only filing a request.
 - U3: a documented guarantee that no log level writes line data.
 
-All three are proposals to the datamodem maintainer under GPL-3.0. This
-repo does not carry patches to datamodem.
+All three go to the datamodem maintainer (and the spandsp half of U2 to
+freeswitch/spandsp) under their own licences. This repo does not carry
+patches to datamodem. A patch prepared for U2 lives in a fork of
+datamodem, not here.
+
+**S7. A 2225 Hz recovery path stays reachable, and each modem gets its
+own mm_manager.** This resolves design review H1 and H2.
+
+- Until a datamodem release with U2 is deployed, every soft-modem site
+  keeps one 2225 Hz answerer (the hardware modem, or el-modem per DS-4)
+  reachable from the dialplan. A terminal that reverts to its default
+  MODEM table, after memory loss or a re-install, needs a Bell answer
+  tone to call in at all. Without that answerer it could never download
+  the fix.
+- Asterisk chooses the modem per terminal, from a variable set on the
+  ATA endpoint. That is the bootstrap route, the migration switch and
+  the rollback (`SPEC.md` §3.2, §3.6).
+- Each modem has its own mm_manager instance, with its own working
+  directory and therefore its own `mm_manager.db` (mm_manager opens it in
+  the current directory, `src/mm_manager.c` L587). Both instances share
+  the table directories and the loopback mm-bridge. Because a terminal is
+  routed to one modem at a time, the two instances never serve the same
+  terminal at once.
 
 ## Owner decisions (open)
 
@@ -402,15 +429,27 @@ repo does not carry patches to datamodem.
 |---|---|---|
 | DS-1 | Accept a GPL-3.0-or-later component on the payphone host, at a process boundary only (S3)? | Yes. Nothing from it is linked into or shipped with this fork. |
 | DS-2 | Shim language: Python (like `tools/cardman_bridge.py`) or C (like `src/`)? | Python: stdlib `pty`, `socket` and `selectors` only, no third-party packages, same review style as the bridge. |
-| DS-3 | Raise U2 (Bell answer tone) upstream before the hardware session, or only if SM-1 and SM-2 fail? | Raise it now, pointing at the v90modem LGPL reference. That costs nothing and may land before the session. |
-| DS-5 | For soft-modem terminals, send a per-terminal MODEM table (`tables/<terminal_id>/mm_table_21.bin`) with ANSWER TONE NOT REQUIRED, bootstrapped by one call-in through a 2225 Hz answerer (hardware modem or el-modem)? | Yes, per terminal and never in `tables/default`, so hardware-modem terminals keep the Nortel default. Generate the file with a small table tool rather than by hand-editing bytes. |
+| DS-3 | How to pursue U2 (Bell answer tone)? | Prepare the patch ourselves from the v90modem LGPL reference, test it with `datamodem selftest` against a Bell 212A originator, and offer it to datamodem now. It is on the critical path (S6). |
+| DS-5 | For soft-modem terminals, send a per-terminal MODEM table (`tables/<terminal_id>/mm_table_21.bin`) with ANSWER TONE NOT REQUIRED, bootstrapped by one call-in through a 2225 Hz answerer (hardware modem or el-modem)? | Yes, **as an interim measure until U2 ships**. Per terminal and never in `tables/default`, so hardware-modem terminals keep the Nortel default. Generate the file with the table tool (`SPEC.md` T-7), not by hand-editing bytes. |
 | DS-4 | If SM-1 and SM-2 fail and no datamodem U2 release exists, try el-modem for SM-3 on an x86-64 host? | Yes, for the test only. Adopt it in production only if it passes SM-1 to SM-8, recording is verified off (SM-8 decode check over its capture directory), and its provenance review (#14) is accepted. |
 
 ## Consequences
 
-- No physical modem is needed when the terminal reaches the host over
-  VoIP through an ATA. The hardware modem path is unchanged and remains
-  the fallback.
+- Day-to-day call-ins need no physical modem. **Until U2 ships,
+  though, a site still needs a 2225 Hz answerer** for bootstrap and
+  recovery (S7): the hardware modem, or el-modem on an x86-64 host. Once
+  a datamodem release with U2 is deployed, the per-terminal MODEM table
+  and the recovery answerer can both be retired. The hardware modem path
+  is unchanged throughout.
+- **Reset risk (interim only):** a terminal that loses its downloaded
+  MODEM table reverts to "answer tone required" and stops reaching
+  datamodem. Recovery is an operator switch to the 2225 Hz route
+  (`SPEC.md` §3.6), and the missed-call-in alarm (`SPEC.md` §4.5) is
+  how the operator finds out.
+- Two mm_manager instances, one per modem, split the local masked
+  history across two `mm_manager.db` files. CARDMAN, via the bridge,
+  stays the system of record, so nothing billable depends on the local
+  databases.
 - One more process holds card data in memory (datamodem), plus the
   shim, which this repo owns. `THREAT_MODEL.md` gains three rows
   (`SPEC.md` §7).
@@ -424,3 +463,19 @@ repo does not carry patches to datamodem.
   contract is plain bytes over a Unix socket, and any modem that can run
   a per-call command (or, after U1, act as an auto-answer Hayes modem)
   can replace it.
+
+## Design review (2026-10-26)
+
+The author reviewed this design against mm_manager's code and the
+terminal-modem findings above. Every finding is dispositioned:
+
+| ID | Sev | Finding | Disposition |
+|---|---|---|---|
+| H1 | High | The fix (DS-5) needs a 2225 Hz bootstrap per terminal, and a terminal that resets to its default MODEM table cannot reach datamodem or download the fix. "No physical modem is needed" was overstated. | **Fixed**: U2 is critical path (S6, DS-3); a 2225 Hz recovery path stays reachable (S7); Consequences corrected, with the reset risk stated. |
+| H2 | High | A mixed fleet (bootstrap on hardware, steady state on datamodem) needs two mm_manager instances, which would share `mm_manager.db` in the working directory (`src/mm_manager.c` L587). The dialplan had a single route. | **Fixed**: S7; `SPEC.md` §3.2 routes per ATA endpoint, and §3.6 covers instances, migration and rollback. |
+| M1 | Med | With `-w`, mm_manager notices a dead session only through about 30 s of timeouts. A call-in during that window has its `RING`/`CONNECT` swallowed inside the protocol loop. | **Fixed**: shim `COOLDOWN` state, refusing calls for 35 s after any call ends (`SPEC.md` §4.1, §4.2). A `+++`/`ATH` hang-up (building without `USE_MODEM_DTR`) is recorded as the fallback if the cooldown proves too slow. |
+| M2 | Med | No test ran the real mm_manager binary against the shim (its termios on a PTY, `CRTSCTS`, `RING`/`CONNECT` parsing, the `-w` path). | **Fixed**: T-6. |
+| M3 | Med | Registration loss or repeated refusals would show only as terminal Error 24 in the field. | **Fixed**: `SPEC.md` §4.5 health signals and alarms (counts only, via the ADR-0001 relay). |
+| M4 | Med | SM-1b could not tell a wrong table bit from a V.22 handshake failure. | **Fixed**: SM-1a proves the bit with a hardware modem whose answer tone is suppressed. |
+| L1 | Low | One call per datamodem instance was not stated as a capacity limit. | **Fixed**: `SPEC.md` §3.3 note. |
+| L2 | Low | The MODEM table had to be generated by a tool, but no test covered it. | **Fixed**: T-7 round-trip test; tool in SM-P1. |

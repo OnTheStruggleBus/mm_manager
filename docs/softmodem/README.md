@@ -6,8 +6,8 @@ Docs only; nothing here is built yet.
 
 | File | What it covers |
 |---|---|
-| [`ADR-0002-SOFT-MODEM.md`](ADR-0002-SOFT-MODEM.md) | Selection criteria, the evidence (nineteen candidates checked against their source and licence files, across three search passes), the decision (datamodem, standalone, behind a fork-side DTE shim), owner decisions DS-1 to DS-5. Start here. |
-| [`SPEC.md`](SPEC.md) | Topology, ATA/Asterisk/datamodem configuration, the `mm-softmodem-dte` shim contract, call flow, security controls C-1 to C-7, licence and supply chain, tests T-1 to T-5 and hardware checks SM-0 to SM-8, phasing, upstream requests U1-U3. |
+| [`ADR-0002-SOFT-MODEM.md`](ADR-0002-SOFT-MODEM.md) | Selection criteria, the evidence (nineteen candidates checked against their source and licence files, across three search passes), the decision (datamodem, standalone, behind a fork-side DTE shim), owner decisions DS-1 to DS-5, and the design review (H1-H2, M1-M4, L1-L2, all dispositioned). Start here. |
+| [`SPEC.md`](SPEC.md) | Topology, ATA/Asterisk/datamodem configuration, the `mm-softmodem-dte` shim contract, call flow, instances/migration/recovery (§3.6), shim states incl. `COOLDOWN`, health signals (§4.5), security controls C-1 to C-7, licence and supply chain, tests T-1 to T-7 and hardware checks SM-0 to SM-10, phasing (U2 on the critical path), upstream requests U1-U3. |
 
 Key finding: datamodem, the selected modem, answers V.22 with the 2100
 Hz tone, not Bell 212A's 2225 Hz, so whether the Millennium accepts it
