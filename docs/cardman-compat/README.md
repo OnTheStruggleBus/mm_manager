@@ -20,6 +20,10 @@ The production bridge, the terminal configuration API (adverts, rate
 tables) and the shared vocabulary are specified separately in
 [`../wapi-bridge/`](../wapi-bridge/README.md) (ADR-0001, proposed).
 
+The soft modem option for the terminal's dial-in (datamodem behind a
+DTE shim) is in [`../softmodem/`](../softmodem/README.md) (ADR-0002,
+proposed).
+
 Agent-facing task cards derived from this plan live in
 [`../../AI/TASKS.md`](../../AI/TASKS.md).
 
