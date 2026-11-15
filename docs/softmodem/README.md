@@ -1,11 +1,14 @@
 # Soft modem
 
-Architecture decision and integration spec for answering the terminal's
-dial-in with an open-source soft modem instead of a hardware modem.
-Docs only; nothing here is built yet.
+Answering the terminal's dial-in with a soft modem instead of a hardware
+modem. **Built:** mm_manager's `-S` option runs a Bell 212A soft modem on a
+SIP call, imported from `jxburros/mm_manager` (ADR-0003). Not yet tested
+against a real terminal.
 
 | File | What it covers |
 |---|---|
+| [`ADR-0003-SIP-SOFTMODEM.md`](ADR-0003-SIP-SOFTMODEM.md) | **Current decision.** The imported built-in modem, what changed on import (bind/allow), owner decisions DS-1 to DS-5, verification, hardware checks SIP-1 to SIP-6. Start here. |
+| [`PHREAKNET.md`](PHREAKNET.md) | Setup with a PhreakNet / Asterisk server: ATA, PJSIP endpoint, dialplan, mm_manager command line, first tests. |
 | [`ADR-0002-SOFT-MODEM.md`](ADR-0002-SOFT-MODEM.md) | Selection criteria, the evidence (nineteen candidates checked against their source and licence files, across three search passes), the decision (datamodem, standalone, behind a fork-side DTE shim), owner decisions DS-1 to DS-5, and the design review (H1-H2, M1-M4, L1-L2, all dispositioned). Start here. |
 | [`SPEC.md`](SPEC.md) | Topology, ATA/Asterisk/datamodem configuration, the `mm-softmodem-dte` shim contract, call flow, instances/migration/recovery (§3.6), placement next to the WAPI bridge (§3.7), shim states incl. `COOLDOWN`, health signals as PIV events (§4.5), security controls C-1 to C-7 mapped to `THREAT_MODEL.md`, licence and supply chain, tests T-1 to T-7 and hardware checks SM-0 to SM-10, phasing (U2 on the critical path), upstream requests U1-U3. |
 | [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) | Draft build plan: review of the SPEC against `src/` (confirmations and gaps P-1 to P-8), task cards SM-T0 to SM-T10 and SM-TU, sequencing into milestones M1 to M4, test map, risks. |

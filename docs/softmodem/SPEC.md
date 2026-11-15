@@ -1,5 +1,10 @@
 # Soft modem integration spec (datamodem)
 
+**Superseded by [ADR-0003](ADR-0003-SIP-SOFTMODEM.md) (2026-11-15).** The
+ATA settings (§3.1), the MODEM table fallback (§3.1a), the security
+controls (§7) and the hardware checks SM-4 to SM-10 still apply to the
+built-in modem; the datamodem, shim and PTY sections do not.
+
 Implements [ADR-0002](ADR-0002-SOFT-MODEM.md). Docs only; nothing here is
 built yet. Upstream facts are cited as `repo@commit path Lnn`. They were
 checked on 2026-10-26 against datamodem `1aa248a` (release v1.1.0), so

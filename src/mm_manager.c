@@ -31,6 +31,7 @@
 
 #include "mm_manager.h"
 #include "mm_serial.h"
+#include "mm_sip.h"
 #include "mm_udp.h"
 #include "mm_cardman.h"
 
@@ -246,7 +247,7 @@ uint8_t table_list_mtr17_intl[] = {
     0                         /* End of table list */
 };
 
-const char cmdline_options[] = "a:b:cd:e:f:hi:k:l:mn:p:qrst:uvw";
+const char cmdline_options[] = "a:b:cd:e:f:hi:k:l:mn:p:qrS:st:uvw";
 
 /* Default communication parameters, may be overridden during compile. */
 #ifndef DEFAULT_BAUD_RATE
@@ -310,6 +311,7 @@ int main(int argc, char *argv[]) {
     int   status;
     int   retries;
     int   betest = 1;
+    static sip_config_t sip_config;
 
     time_t rawtime;
     struct tm ptm = { 0 };
@@ -495,6 +497,16 @@ int main(int argc, char *argv[]) {
                 printf("NOTE: Rating test mode enabled.\n");
                 mm_context->rating_test_mode = 1;
                 break;
+            case 'S':
+                if (sip_config_parse(&sip_config, optarg) != 0) {
+                    fprintf(stderr, "Error: invalid SIP configuration (-S).\n");
+                    mm_shutdown(mm_context);
+                    return(-EINVAL);
+                }
+                mm_context->connection.sip_config = &sip_config;
+                mm_context->connection.proto.use_modem = TRUE;
+                mm_context->test_mode = FALSE;
+                break;
             case 's':
                 printf("NOTE: Using minimum required table list for download.\n");
                 mm_context->minimal_table_set = 1;
@@ -520,7 +532,7 @@ int main(int argc, char *argv[]) {
                 break;
             case '?':
             default:
-                if ((optopt == 'f') || (optopt == 'l') || (optopt == 'a') || (optopt == 'n') || (optopt == 'b')) {
+                if ((optopt == 'f') || (optopt == 'l') || (optopt == 'a') || (optopt == 'n') || (optopt == 'b') || (optopt == 'S')) {
                     fprintf(stderr, "Option -%c requires an argument.\n", optopt);
                 } else {
                     fprintf(stderr, "Unknown option `-%c'.\n", optopt);
@@ -588,6 +600,12 @@ int main(int argc, char *argv[]) {
         (void)fprintf(stderr, "mm_manager: error opening database.\n");
         mm_shutdown(mm_context);
         return(-EINVAL);
+    }
+
+    if (mm_context->connection.sip_config != NULL) {
+        sip_config.debug = mm_context->debuglevel;
+        printf("Using SIP virtual modem (software Bell 212A modem, %s).\n",
+               (sip_config.registrar[0] != '\0') ? "registering with SIP registrar" : "accepting direct SIP calls");
     }
 
     status = mm_connection_open(&mm_context->connection, modem_dev, baudrate, mm_context->test_mode);
@@ -1915,9 +1933,9 @@ time_t mm_time(int test_mode, time_t *rawtime) {
 }
 
 static void mm_display_help(const char *name, FILE *stream) {
-    /* "a:b:cd:e:f:hi:k:l:mn:p:qrst:uvw" */
+    /* "a:b:cd:e:f:hi:k:l:mn:p:qrS:st:uvw" */
     fprintf(stream,
-        "usage: %s [-vhmq] [-f <filename>] [-i \"modem init string\"] [-l <logfile>] [-p <pcapfile>] [-a <access_code>] [-k <key_code>] [-n <ncc_number>] [-d <default_table_dir] [-t <term_table_dir>] [-u <port>]\n",
+        "usage: %s [-vhmq] [-f <filename>] [-i \"modem init string\"] [-l <logfile>] [-p <pcapfile>] [-a <access_code>] [-k <key_code>] [-n <ncc_number>] [-d <default_table_dir] [-t <term_table_dir>] [-u <port>] [-S <sip_config>]\n",
         name);
     fprintf(stream,
             "\t-a <access_code> - Craft 7-digit access code (default: CRASERV)\n" \
@@ -1935,6 +1953,11 @@ static void mm_display_help(const char *name, FILE *stream) {
             "\t-p <pcapfile> - Save packets in a .pcap file.\n" \
             "\t-q - Don't display sign-on banner.\n" \
             "\t-r - Rating test mode: Amount charged determined by last 4 digits of dialed number.\n" \
+            "\t-S <sip_config> - Use the SIP virtual modem instead of a serial modem.  <sip_config> is:\n" \
+            "\t     user[:password]@registrar[:port][;option=value...] to register with a SIP server, or\n" \
+            "\t     listen[;option=value...] to accept direct SIP calls without registering.\n" \
+            "\t     Options: bind, port, rtp_port, expires, auth_user, domain, local_ip, codec=pcmu|pcma,\n" \
+            "\t     answer_tone=2225|2100.  The password may also be given in MM_SIP_PASSWORD.\n" \
             "\t-s - Download only minimum required tables to terminal.\n" \
             "\t-t <term_table_dir> - terminal-specific table directory.\n" \
             "\t-u <port> - Send packets as UDP to <port>.\n" \

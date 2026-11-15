@@ -1332,12 +1332,15 @@ typedef struct mm_telco {
     uint8_t region_code[3];
 } mm_telco_t;
 
+struct sip_config;
+
 typedef struct mm_connection {
     FILE* logstream;
     FILE* bytestream;
     char modem_reset_string[256];
     char modem_init_string[256];
     int test_mode;
+    struct sip_config* sip_config;  /* SIP virtual modem configuration, NULL to use a serial modem. */
     /* Terminal Communication */
     mm_proto_t proto;
 } mm_connection_t;

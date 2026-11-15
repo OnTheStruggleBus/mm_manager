@@ -13,6 +13,7 @@
 #include <string.h> /* String function definitions */
 
 #include "mm_serial.h"
+#include "mm_vmodem.h"
 
 /*
  * Open serial port specified in modem_dev.
@@ -41,11 +42,36 @@ mm_serial_context_t* open_serial(const char *modem_dev, FILE *logstream, FILE *b
     return pserial_context;
 }
 
+/*
+ * Open the SIP virtual modem as if it were a serial port.
+ */
+mm_serial_context_t* open_virtual_serial(struct mm_vmodem *vmodem, FILE *logstream) {
+    mm_serial_context_t *pserial_context;
+
+    pserial_context = (mm_serial_context_t *)calloc(1, sizeof(mm_serial_context_t));
+
+    if (pserial_context == NULL) {
+        fprintf(stderr, "%s: Error allocating memory.\n", __func__);
+        exit(-ENOMEM);
+    }
+
+    pserial_context->fd = -1;
+    pserial_context->logstream = logstream;
+    pserial_context->vmodem = vmodem;
+
+    return pserial_context;
+}
+
 int close_serial(mm_serial_context_t *pserial_context) {
     int status = -1;
 
     if (pserial_context != NULL) {
-        status = platform_close_serial(pserial_context->fd);
+        if (pserial_context->vmodem != NULL) {
+            vmodem_close(pserial_context->vmodem);
+            status = 0;
+        } else {
+            status = platform_close_serial(pserial_context->fd);
+        }
         free(pserial_context);
     }
 
@@ -55,7 +81,7 @@ int close_serial(mm_serial_context_t *pserial_context) {
 int init_serial(mm_serial_context_t *pserial_context, int baudrate) {
     int status = 0;
 
-    if (pserial_context->bytestream == NULL) {
+    if ((pserial_context->bytestream == NULL) && (pserial_context->vmodem == NULL)) {
         status = platform_init_serial(pserial_context->fd, baudrate);
     }
 
@@ -64,6 +90,20 @@ int init_serial(mm_serial_context_t *pserial_context, int baudrate) {
 
 ssize_t read_serial(mm_serial_context_t *pserial_context, void *buf, size_t count, int inject_error) {
     ssize_t bytes_read = -1;
+
+    if (pserial_context->vmodem != NULL) {
+        bytes_read = (ssize_t)vmodem_read(pserial_context->vmodem, buf, count);
+        if (inject_error && (bytes_read > 0)) {
+            printf("Invert RX data\n");
+            ((uint8_t *)buf)[0] = ~((uint8_t*)buf)[0];
+        }
+        if ((pserial_context->logstream != NULL) && (bytes_read > 0)) {
+            for (ssize_t i = 0; i < bytes_read; i++) {
+                fprintf(pserial_context->logstream, "UART: RX: %02X\n", ((uint8_t*)buf)[i]);
+            }
+        }
+        return bytes_read;
+    }
 
     if (pserial_context->bytestream == NULL) {
         bytes_read = platform_read_serial(pserial_context->fd, buf, count);
@@ -119,8 +159,10 @@ ssize_t write_serial(mm_serial_context_t *pserial_context, const void *buf, size
         }
     }
 
-    /* If we are using a serial port, send the data */
-    if (pserial_context->bytestream == NULL) {
+    /* If we are using a serial port (or the virtual modem), send the data */
+    if (pserial_context->vmodem != NULL) {
+        bytes_written = (ssize_t)vmodem_write(pserial_context->vmodem, buf, count);
+    } else if (pserial_context->bytestream == NULL) {
         bytes_written = platform_write_serial(pserial_context->fd, buf, count);
     }
 
@@ -129,7 +171,9 @@ ssize_t write_serial(mm_serial_context_t *pserial_context, const void *buf, size
 
 int drain_serial(mm_serial_context_t *pserial_context) {
     int status = -1;
-    if (pserial_context->bytestream == NULL) {
+    if (pserial_context->vmodem != NULL) {
+        status = vmodem_drain(pserial_context->vmodem);
+    } else if (pserial_context->bytestream == NULL) {
         status = platform_drain_serial(pserial_context->fd);
     }
     return status;
@@ -137,7 +181,9 @@ int drain_serial(mm_serial_context_t *pserial_context) {
 
 int flush_serial(mm_serial_context_t *pserial_context) {
     int status = -1;
-    if (pserial_context->bytestream == NULL) {
+    if (pserial_context->vmodem != NULL) {
+        status = vmodem_flush(pserial_context->vmodem);
+    } else if (pserial_context->bytestream == NULL) {
         status = platform_flush_serial(pserial_context->fd);
     }
     return status;
@@ -145,7 +191,9 @@ int flush_serial(mm_serial_context_t *pserial_context) {
 
 int serial_set_dtr(mm_serial_context_t *pserial_context, int set) {
     int status = -1;
-    if (pserial_context->bytestream == NULL) {
+    if (pserial_context->vmodem != NULL) {
+        status = vmodem_set_dtr(pserial_context->vmodem, set);
+    } else if (pserial_context->bytestream == NULL) {
         status = platform_serial_set_dtr(pserial_context->fd, set);
     }
     return status;
@@ -153,7 +201,9 @@ int serial_set_dtr(mm_serial_context_t *pserial_context, int set) {
 
 int serial_get_modem_status(mm_serial_context_t* pserial_context) {
     int status = -1;
-    if (pserial_context->bytestream == NULL) {
+    if (pserial_context->vmodem != NULL) {
+        status = vmodem_get_modem_status(pserial_context->vmodem);
+    } else if (pserial_context->bytestream == NULL) {
         status = platform_serial_get_modem_status(pserial_context->fd);
     }
     return status;

@@ -1,6 +1,8 @@
 # ADR-0002: Soft modem for terminal dial-in (datamodem)
 
-- **Status**: Proposed, 2026-10-26. Owner decisions DS-1 to DS-5 open.
+- **Status**: Superseded, 2026-11-15, by [ADR-0003](ADR-0003-SIP-SOFTMODEM.md)
+  (built-in SIP soft modem). Proposed 2026-10-26; kept for its evidence
+  and design review. Owner decisions DS-1 to DS-5 are recorded in ADR-0003.
 - **Scope**: the modem leg between a Nortel Millennium terminal and
   mm_manager, on the payphone host. No change to `src/`; no change to the
   card path or to the decisions in `AI/CARDMAN_CONTEXT.md` or ADR-0001.

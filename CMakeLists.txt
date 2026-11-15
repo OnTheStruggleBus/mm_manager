@@ -111,6 +111,12 @@ include_directories("third-party" ".")
 
 ADD_LIBRARY(mm_util STATIC "src/mm_util.c")
 ADD_LIBRARY(sqlite3 STATIC "third-party/sqlite3.c" "third-party/sqlite3.h")
+if(NOT MSVC)
+    # Vendored SQLite: GCC 14 (Debian 13) reports a false-positive
+    # -Wstringop-overread in sqlite3Strlen30(). Keep the warnings visible,
+    # but don't fail the build on third-party code; our own sources stay -Werror.
+    target_compile_options(sqlite3 PRIVATE -Wno-error)
+endif()
 
 if(MSVC)
 ADD_LIBRARY(mm_serial STATIC "src/mm_serial_win32.c" "src/mm_serial.h" "third-party/getopt.c" "third-party/getopt.h")
@@ -139,6 +145,14 @@ set(MANAGER_SRC
     "src/mm_udp.c"
     "src/mm_udp.h"
     "src/mm_sqlite3.c"
+    "src/mm_osal.c"
+    "src/mm_osal.h"
+    "src/mm_sip.c"
+    "src/mm_sip.h"
+    "src/mm_softmodem.c"
+    "src/mm_softmodem.h"
+    "src/mm_vmodem.c"
+    "src/mm_vmodem.h"
 )
 
 set(DLOG2PCAP_SRC
@@ -153,7 +167,7 @@ add_executable (mm_manager ${MANAGER_SRC})
 if(MSVC)
 TARGET_LINK_LIBRARIES(mm_manager mm_serial mm_util sqlite3 wsock32 ws2_32)
 else()
-TARGET_LINK_LIBRARIES(mm_manager mm_serial mm_util sqlite3 pthread dl)
+TARGET_LINK_LIBRARIES(mm_manager mm_serial mm_util sqlite3 pthread dl m)
 endif()
 # CARDMAN glue tests: offline unit tests (ctest) and a driver that sends
 # synthetic wire records through the real glue to a running bridge.
@@ -174,6 +188,28 @@ TARGET_LINK_LIBRARIES(mm_cardman_drive wsock32 ws2_32)
 endif()
 enable_testing()
 add_test(NAME mm_cardman_test COMMAND mm_cardman_test)
+
+# SIP virtual modem (software Bell 212A modem and SIP user agent), imported
+# from jxburros/mm_manager (MIT). See docs/softmodem/ADR-0003-SIP-SOFTMODEM.md.
+add_executable (test_softmodem "tests/test_softmodem.c" "src/mm_softmodem.c" "src/mm_softmodem.h")
+add_executable (test_sip_vmodem "tests/test_sip_vmodem.c" "src/mm_sip.c" "src/mm_vmodem.c"
+                "src/mm_softmodem.c" "src/mm_osal.c")
+if(MSVC)
+TARGET_LINK_LIBRARIES(test_sip_vmodem wsock32 ws2_32)
+else()
+TARGET_LINK_LIBRARIES(test_softmodem m)
+TARGET_LINK_LIBRARIES(test_sip_vmodem pthread m)
+endif()
+add_test(NAME softmodem COMMAND test_softmodem)
+add_test(NAME sip_vmodem COMMAND test_sip_vmodem)
+add_executable (test_sip_access "tests/test_sip_access.c" "src/mm_sip.c" "src/mm_softmodem.c" "src/mm_osal.c")
+if(MSVC)
+TARGET_LINK_LIBRARIES(test_sip_access wsock32 ws2_32)
+else()
+TARGET_LINK_LIBRARIES(test_sip_access pthread m)
+endif()
+add_test(NAME sip_access COMMAND test_sip_access)
+set_tests_properties(sip_vmodem PROPERTIES TIMEOUT 120)
 
 add_executable (mm_admess "src/mm_admess.c" "src/mm_manager.h")
 TARGET_LINK_LIBRARIES(mm_admess mm_util)

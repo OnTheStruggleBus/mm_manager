@@ -1,6 +1,7 @@
 # Soft modem implementation plan
 
-- **Status**: Draft, 2026-10-27. Nothing is built yet.
+- **Status**: Superseded, 2026-11-15, by [ADR-0003](ADR-0003-SIP-SOFTMODEM.md).
+  Not built. SM-T5 (MODEM table tool) remains useful for the DS-5 fallback.
 - **Implements**: [ADR-0002](ADR-0002-SOFT-MODEM.md) and [`SPEC.md`](SPEC.md).
   Section numbers below (§n) refer to `SPEC.md` unless another file is named.
 - **Does not change**: `src/`, the card path, ADR-0001's planes.

@@ -14,6 +14,7 @@ Manager for Nortel Millennium payphones. C11, CMake, bundled SQLite.
 | `src/mm_accounting.c` | SQLite persistence (TAUTH, TCDR, TOPCODE, ...). |
 | `src/mm_util.c` | BCD/phone helpers, `mask_pan()`, table printers. |
 | `src/mm_cardman_bridge.[ch]` | Fork-only HTTP/JSON client to the CARDMAN bridge. |
+| `src/mm_softmodem.c`, `mm_vmodem.c`, `mm_sip.c`, `mm_osal.c` | Built-in SIP soft modem (`-S`), imported from `jxburros/mm_manager`; `bind`/`allow` added here. ADR-0003. Tests: `test_softmodem`, `test_sip_vmodem`, `test_sip_access`. |
 | `src/mm_packtest.c` | `sizeof` assertions for every wire struct. |
 | `src/mm_card.c`, `mm_rate.c`, ... | Standalone table editor CLIs. |
 | `tables/` | Binary table files downloaded to terminals. |
