@@ -111,6 +111,12 @@ include_directories("third-party" ".")
 
 ADD_LIBRARY(mm_util STATIC "src/mm_util.c")
 ADD_LIBRARY(sqlite3 STATIC "third-party/sqlite3.c" "third-party/sqlite3.h")
+if(NOT MSVC)
+    # Vendored SQLite: GCC 14 (Debian 13) reports a false-positive
+    # -Wstringop-overread in sqlite3Strlen30(). Keep the warnings visible,
+    # but don't fail the build on third-party code; our own sources stay -Werror.
+    target_compile_options(sqlite3 PRIVATE -Wno-error)
+endif()
 
 if(MSVC)
 ADD_LIBRARY(mm_serial STATIC "src/mm_serial_win32.c" "src/mm_serial.h" "third-party/getopt.c" "third-party/getopt.h")
