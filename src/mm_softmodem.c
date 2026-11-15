@@ -251,6 +251,12 @@ softmodem_t *softmodem_create(int answer_mode, int answer_tone_hz,
 }
 
 void softmodem_free(softmodem_t *sm) {
+    volatile uint8_t *v = (volatile uint8_t *)sm;
+    size_t n = sizeof(*sm);
+
+    /* Its bit and byte buffers hold recent line data (PAN/PIN): wipe before freeing. */
+    if (sm == NULL) return;
+    while (n--) *v++ = 0;
     free(sm);
 }
 

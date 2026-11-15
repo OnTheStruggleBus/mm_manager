@@ -5,7 +5,9 @@
  * reach the modem can act as a terminal, so:
  *   - the sockets never bind the wildcard address (bind defaults to 127.0.0.1);
  *   - "listen" on a non-loopback address requires allow=<PBX address>;
- *   - SIP and RTP from any address other than allow (or the registrar) are dropped.
+ *   - SIP and RTP from any address other than allow (or the registrar) are dropped;
+ *   - RTP is also accepted from the media address in the allowed peer's SDP;
+ *   - a registrar on another host with the default loopback bind is refused.
  *
  * See docs/softmodem/ADR-0003-SIP-SOFTMODEM.md.
  */
@@ -40,6 +42,11 @@ static void test_parse(void) {
     CHECK(sip_config_parse(&cfg, "listen;allow=pbx.example") != 0, "allow=<hostname> refused");
     CHECK(sip_config_parse(&cfg, "1000@192.0.2.1;bind=192.0.2.5") == 0,
           "registrar mode on non-loopback accepted (registrar is the allowed peer)");
+    CHECK(sip_config_parse(&cfg, "1000@192.0.2.1") != 0,
+          "remote registrar with default loopback bind refused");
+    CHECK(sip_config_parse(&cfg, "1000@127.0.0.1:5060;port=5062") == 0,
+          "local registrar with default loopback bind accepted");
+    CHECK(sip_config_parse(&cfg, "listen;secretword") != 0, "option without a value refused");
 }
 
 static osal_socket_t udp_from(const char *ip) {
@@ -124,12 +131,97 @@ static void test_peer_filter(void) {
     sip_ua_destroy(ua);
 }
 
+static int rx_audio_calls;
+
+static void count_rx_audio(void *user, const int16_t *amp, int len) {
+    (void)user; (void)amp; (void)len;
+    rx_audio_calls++;
+}
+
+static void send_from(osal_socket_t s, uint16_t port, const void *buf, int len) {
+    struct sockaddr_in dst;
+
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(port);
+    inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
+    sendto(s, buf, len, 0, (const struct sockaddr *)&dst, (osal_socklen_t)sizeof(dst));
+}
+
+static void poll_for(sip_ua_t *ua, int ms) {
+    for (int i = 0; i < ms / 20; i++) sip_ua_poll(ua, 20);
+}
+
+/* RTP from the SDP media address of the allowed peer is accepted; from anywhere else, dropped. */
+static void test_sdp_media_address(void) {
+    sip_config_t cfg;
+    sip_ua_t *ua;
+    sip_callbacks_t cb = { NULL, NULL, count_rx_audio };
+    osal_socket_t sig = udp_from("127.0.0.2");     /* the PBX's SIP address */
+    osal_socket_t media = udp_from("127.0.0.3");   /* the PBX's media address (in its SDP) */
+    osal_socket_t other = udp_from("127.0.0.4");   /* anyone else */
+    char msg[1024];
+    char sdp[256];
+    uint8_t rtp[12 + 160];
+    int len, before;
+
+    if ((sig == OSAL_INVALID_SOCKET) || (media == OSAL_INVALID_SOCKET) || (other == OSAL_INVALID_SOCKET)) {
+        printf("skip: SDP media address test needs 127.0.0.2-4 (Linux)\n");
+        if (sig != OSAL_INVALID_SOCKET) osal_close_socket(sig);
+        if (media != OSAL_INVALID_SOCKET) osal_close_socket(media);
+        if (other != OSAL_INVALID_SOCKET) osal_close_socket(other);
+        return;
+    }
+
+    if (sip_config_parse(&cfg, "listen;port=25262;rtp_port=26200;allow=127.0.0.2") != 0) {
+        CHECK(0, "parse for SDP media test");
+        return;
+    }
+    ua = sip_ua_create(&cfg, &cb, NULL);
+    CHECK(ua != NULL, "UA created for SDP media test");
+    if (ua == NULL) return;
+
+    snprintf(sdp, sizeof(sdp), "v=0\r\no=pbx 1 1 IN IP4 127.0.0.3\r\ns=-\r\nc=IN IP4 127.0.0.3\r\n"
+             "t=0 0\r\nm=audio 40000 RTP/AVP 0\r\n");
+    len = snprintf(msg, sizeof(msg),
+                   "INVITE sip:mm@127.0.0.1:25262 SIP/2.0\r\n"
+                   "Via: SIP/2.0/UDP 127.0.0.2:5060;branch=z9hG4bKsdp1\r\n"
+                   "From: <sip:ata@127.0.0.2>;tag=a1\r\nTo: <sip:mm@127.0.0.1>\r\n"
+                   "Call-ID: sdp-media-1\r\nCSeq: 1 INVITE\r\nContact: <sip:ata@127.0.0.2:5060>\r\n"
+                   "Content-Type: application/sdp\r\nContent-Length: %d\r\n\r\n%s",
+                   (int)strlen(sdp), sdp);
+    send_from(sig, 25262, msg, len);
+    poll_for(ua, 200);
+    CHECK(sip_ua_answer(ua) == 0, "INVITE from the allowed peer is offered and answered");
+
+    memset(rtp, 0xFF, sizeof(rtp));
+    rtp[0] = 0x80; rtp[1] = 0; rtp[8] = 1;
+
+    before = rx_audio_calls;
+    rtp[2] = 0; rtp[3] = 1;
+    send_from(other, 26200, rtp, (int)sizeof(rtp));
+    poll_for(ua, 200);
+    CHECK(rx_audio_calls == before, "RTP from an address outside SIP peer and SDP is dropped");
+
+    before = rx_audio_calls;
+    rtp[3] = 2;
+    send_from(media, 26200, rtp, (int)sizeof(rtp));
+    poll_for(ua, 200);
+    CHECK(rx_audio_calls > before, "RTP from the SDP media address is accepted");
+
+    sip_ua_destroy(ua);
+    osal_close_socket(sig);
+    osal_close_socket(media);
+    osal_close_socket(other);
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (osal_net_init() != 0) return 1;
 
     test_parse();
     test_peer_filter();
+    test_sdp_media_address();
 
     printf("%s\n", failures ? "SIP access test FAILED" : "SIP access test PASSED");
     return failures ? 1 : 0;

@@ -74,6 +74,13 @@ struct mm_vmodem {
     uint64_t       last_rx_audio;   /* Time RTP audio was last received */
 };
 
+/* Line data includes full PANs and PINs: wipe it, don't just reset the indices (SECURITY_RULES 3). */
+static void secure_zero(void *p, size_t n) {
+    volatile uint8_t *v = (volatile uint8_t *)p;
+
+    while (n--) *v++ = 0;
+}
+
 static size_t fifo_count(const vm_fifo_t *f) {
     return (f->head - f->tail) & (VM_FIFO_SIZE - 1);
 }
@@ -92,11 +99,13 @@ static int fifo_get(vm_fifo_t *f) {
 
     if (f->head == f->tail) return -1;
     byte = f->data[f->tail];
+    f->data[f->tail] = 0;       /* Line data (PAN/PIN) must not linger once consumed. */
     f->tail = (f->tail + 1) & (VM_FIFO_SIZE - 1);
     return byte;
 }
 
 static void fifo_clear(vm_fifo_t *f) {
+    secure_zero(f->data, sizeof(f->data));
     f->head = 0;
     f->tail = 0;
 }
@@ -365,6 +374,7 @@ void vmodem_close(mm_vmodem_t *vm) {
     if (vm->sm != NULL) softmodem_free(vm->sm);
     osal_cond_destroy(&vm->cond);
     osal_mutex_destroy(&vm->lock);
+    secure_zero(vm, sizeof(*vm));
     free(vm);
 }
 

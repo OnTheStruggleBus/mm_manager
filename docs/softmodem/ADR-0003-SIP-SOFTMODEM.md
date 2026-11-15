@@ -65,12 +65,20 @@ Owner decisions recorded with this ADR (2026-11-15):
    - `local_ip` (the address advertised in Contact and SDP) defaults to
      `bind`. This disables the imported NAT discovery, which this setup
      does not need (Asterisk on the same host or on the voice VLAN).
-2. The `-S` parse error no longer echoes the argument, which can contain
-   the SIP password.
-3. Upstream files touched only at call sites: `mm_serial.[ch]` and
+   - RTP is also accepted from the media address named in SDP from the
+     allowed SIP peer (Asterisk `media_address`, several interfaces).
+   - A registrar on another host with the default loopback bind is refused
+     at start-up (it could never register).
+2. The `-S` parse errors no longer echo the argument or option text, which
+   can contain the SIP password.
+3. Line data is wiped from memory (SECURITY_RULES 3): each byte in the
+   modem's FIFOs is zeroed as it is read, FIFOs are zeroed when cleared,
+   and the modem, virtual modem and SIP agent structures (bit buffers, RTP
+   audio slots) are zeroed before they are freed.
+4. Upstream files touched only at call sites: `mm_serial.[ch]` and
    `mm_connection.c` (as imported), `mm_manager.h` (one field),
    `mm_manager.c` (`-S` option and help). No branding changes.
-4. New test `tests/test_sip_access.c` (ctest `sip_access`): the bind/allow
+5. New test `tests/test_sip_access.c` (ctest `sip_access`): the bind/allow
    parse rules, and that OPTIONS from a non-allowed loopback address is
    dropped while the allowed one is answered.
 

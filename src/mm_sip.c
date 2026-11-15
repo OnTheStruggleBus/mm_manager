@@ -116,6 +116,8 @@ struct sip_ua {
     struct in_addr     bind_addr;           /* Address the SIP and RTP sockets are bound to */
     struct in_addr     allow_addr;          /* Only peer accepted, when allow_set */
     int                allow_set;
+    struct in_addr     media_addr;          /* RTP address from the allowed peer's SDP */
+    int                media_set;
     uint32_t           dropped_packets;     /* SIP/RTP packets dropped from other addresses */
 
     /* Registration */
@@ -807,7 +809,7 @@ int sip_config_parse(sip_config_t *cfg, const char *spec) {
         if (next != NULL) *next++ = '\0';
         eq = strchr(opts, '=');
         if (eq == NULL) {
-            fprintf(stderr, "SIP: option '%s' requires a value.\n", opts);
+            fprintf(stderr, "SIP: every option after ';' must be name=value.\n");
             return -1;
         }
         *eq = '\0';
@@ -843,6 +845,18 @@ int sip_config_parse(sip_config_t *cfg, const char *spec) {
             ((ntohl(a.s_addr) >> 24) != 127)) {
             fprintf(stderr, "SIP: 'listen' on a non-loopback address requires allow=<PBX address>.\n");
             return -1;
+        }
+
+        /* A loopback-bound socket cannot reach a registrar on another host. */
+        if ((cfg->registrar[0] != '\0') && ((ntohl(a.s_addr) >> 24) == 127)) {
+            struct sockaddr_in reg;
+
+            if ((resolve_ipv4(cfg->registrar, cfg->registrar_port, &reg) == 0) &&
+                ((ntohl(reg.sin_addr.s_addr) >> 24) != 127)) {
+                fprintf(stderr, "SIP: registrar '%s' is not on this host; set bind=<this host's address "
+                        "on the network the PBX is on>.\n", cfg->registrar);
+                return -1;
+            }
         }
     }
 
@@ -1167,6 +1181,9 @@ static int parse_sdp(sip_ua_t *ua, const char *sdp) {
         addr.sin_family = AF_INET;
         if (inet_pton(AF_INET, media_ip, &addr.sin_addr) == 1) {
             addr.sin_port = htons((uint16_t)port);
+            /* Only SDP from the allowed SIP peer gets here, so its media address may send RTP. */
+            ua->media_addr = addr.sin_addr;
+            ua->media_set = 1;
             if (!ua->rtp_latched) {
                 ua->rtp_remote = addr;
             }
@@ -1183,6 +1200,7 @@ static void reset_media(sip_ua_t *ua) {
     ua->rx_last_len = RTP_SAMPLES;
     memset(ua->rx_slots, 0, sizeof(ua->rx_slots));
     memset(&ua->rtp_remote, 0, sizeof(ua->rtp_remote));
+    ua->media_set = 0;
     ua->tx_seq = (uint16_t)osal_random32();
     ua->tx_ts = osal_random32();
     ua->tx_marker = 1;
@@ -1520,6 +1538,14 @@ static int peer_allowed(sip_ua_t *ua, const struct sockaddr_in *src) {
     return 0;
 }
 
+/* RTP may also come from the media address named in the PBX's SDP (e.g. Asterisk media_address). */
+static int rtp_peer_allowed(sip_ua_t *ua, const struct sockaddr_in *src) {
+    if (ua->media_set && (src->sin_addr.s_addr == ua->media_addr.s_addr)) {
+        return 1;
+    }
+    return peer_allowed(ua, src);
+}
+
 static void handle_sip_packet(sip_ua_t *ua, const char *data, int len, const struct sockaddr_in *src) {
     static sip_msg_t msg;   /* Only used from the SIP thread. */
 
@@ -1816,6 +1842,13 @@ void sip_ua_destroy(sip_ua_t *ua) {
 
     if (ua->sip_sock != OSAL_INVALID_SOCKET) osal_close_socket(ua->sip_sock);
     if (ua->rtp_sock != OSAL_INVALID_SOCKET) osal_close_socket(ua->rtp_sock);
+    {
+        /* The RTP re-ordering slots hold modulated line audio (decodable PAN/PIN). */
+        volatile uint8_t *v = (volatile uint8_t *)ua;
+        size_t n = sizeof(*ua);
+
+        while (n--) *v++ = 0;
+    }
     free(ua);
 }
 
@@ -1858,7 +1891,7 @@ void sip_ua_poll(sip_ua_t *ua, uint32_t timeout_ms) {
 
                 srclen = (osal_socklen_t)sizeof(src);
                 len = (int)recvfrom(ua->rtp_sock, buf, (int)sizeof(buf), 0, (struct sockaddr *)&src, &srclen);
-                if ((len > 0) && peer_allowed(ua, &src)) handle_rtp_packet(ua, (const uint8_t *)buf, len, &src);
+                if ((len > 0) && rtp_peer_allowed(ua, &src)) handle_rtp_packet(ua, (const uint8_t *)buf, len, &src);
 
                 FD_ZERO(&one);
                 FD_SET(ua->rtp_sock, &one);

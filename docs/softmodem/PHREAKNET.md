@@ -84,25 +84,35 @@ environment rather than on the command line (where `ps` would show it):
 
 ```bash
 MM_SIP_PASSWORD='<secret>' CARDMAN_BRIDGE_ADDR=127.0.0.1:8420 \
-  ./build/mm_manager -S "mm-modem@127.0.0.1:5060;port=5062;rtp_port=12000" \
+  ./build/mm_manager -S "mm-modem@127.0.0.1:5060;port=5062;rtp_port=30000" \
   -n <manager number> -d tables/default -t tables
 ```
 
 - `bind` defaults to `127.0.0.1`, and only the registrar's address
   (`127.0.0.1` here) may send SIP or RTP.
-- Pick `port` and `rtp_port` outside Asterisk's own SIP port and RTP range
-  (`rtp.conf`, often 10000-20000).
+- Pick `port` and `rtp_port` outside Asterisk's own SIP port and RTP range.
+  Asterisk's default range is 10000-20000 (`rtp.conf` `rtpstart`/`rtpend`),
+  and mm_manager's default `rtp_port` (10000) is inside it, so always set
+  `rtp_port` (30000 here). Its default SIP `port` (5060) is Asterisk's, so
+  always set `port` too.
+- `listen` mode (no registrar) on loopback accepts calls from any process
+  on this host. Prefer registering to Asterisk as shown, so only the
+  registrar's address is accepted.
+- If Asterisk sends media from a different address than its SIP address
+  (`media_address`, several interfaces), RTP from the address in its SDP is
+  accepted too. RTP from anywhere else is dropped.
 - Do not add `-v`, `-l`, `-p` or `-u` in CARDMAN use: they still write card
   data (rule 4, task T4).
 - One call at a time. For a second simultaneous call-in, run another
   instance with its own SIP user, ports and working directory.
 
 If Asterisk is on another host, put both on an isolated voice VLAN and
-bind to it explicitly:
+bind to it explicitly (mm_manager refuses to start with a remote registrar
+and the default loopback bind):
 
 ```bash
 MM_SIP_PASSWORD='<secret>' ./build/mm_manager \
-  -S "mm-modem@<asterisk ip>:5060;bind=<this host's voice-VLAN ip>;port=5062;rtp_port=12000" \
+  -S "mm-modem@<asterisk ip>:5060;bind=<this host's voice-VLAN ip>;port=5062;rtp_port=30000" \
   -n <manager number>
 ```
 
