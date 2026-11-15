@@ -19,6 +19,8 @@
 #include "mm_manager.h"
 #include "mm_serial.h"
 #include "mm_udp.h"
+#include "mm_sip.h"
+#include "mm_vmodem.h"
 
 extern int manager_running;
 extern const char* modem_responses[];
@@ -28,7 +30,20 @@ int mm_connection_open(mm_connection_t* connection, const char *modem_dev, int b
     int   status;
 
     connection->test_mode = test_mode;
-    if (test_mode) {
+    if (connection->sip_config != NULL) {
+        /* SIP virtual modem: a software modem on a SIP call takes the place of a physical modem. */
+        struct mm_vmodem *vmodem;
+
+        connection->bytestream = NULL;
+        vmodem = vmodem_open(connection->sip_config);
+        if (vmodem == NULL) {
+            fprintf(stderr, "Unable to start SIP virtual modem.\n");
+            mm_connection_close(connection);
+            return(-ENODEV);
+        }
+        connection->proto.serial_context = open_virtual_serial(vmodem, connection->logstream);
+    }
+    else if (test_mode) {
         if (modem_dev == NULL) {
             (void)fprintf(stderr, "mm_manager: -f <filename> must be specified.\n");
             mm_connection_close(connection);
@@ -50,7 +65,9 @@ int mm_connection_open(mm_connection_t* connection, const char *modem_dev, int b
         }
     }
 
-    connection->proto.serial_context = open_serial(modem_dev, connection->logstream, connection->bytestream);
+    if (connection->sip_config == NULL) {
+        connection->proto.serial_context = open_serial(modem_dev, connection->logstream, connection->bytestream);
+    }
 
     if (connection->proto.serial_context == NULL) {
         fprintf(stderr, "Unable to open modem: %s.", modem_dev);

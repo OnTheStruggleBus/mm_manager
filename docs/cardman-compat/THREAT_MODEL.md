@@ -18,6 +18,7 @@ mm_manager process in this fork. Line numbers at commit `3e173a3`.
 | Sink | Contents today | Status | Required control |
 |---|---|---|---|
 | Wire to/from terminal | Full PAN, PIN | Inherent to protocol | Physical/telephone line; out of scope. |
+| RTP audio between Asterisk and `mm_manager -S` (SIP soft modem) | Modulated PAN/PIN (decodable) | New with ADR-0003 | Loopback or isolated voice VLAN; `bind`/`allow` (only the PBX may send SIP/RTP); no recording or debug capture on the route (`docs/softmodem/ADR-0003-SIP-SOFTMODEM.md`). |
 | `mm_acct_save_TAUTH` stdout + SQLite | Masked PAN, no PIN | Fixed (PR #1) | Keep; cover with test. |
 | `mm_acct_save_TCDR` stdout + SQLite | Masked PAN | Fixed (PR #1) | Keep; cover with test. |
 | `mm_acct_save_TOPCODE` | Craft PIN redacted | Fixed (PR #1) | Keep. |

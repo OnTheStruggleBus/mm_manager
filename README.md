@@ -65,6 +65,18 @@ actually calls CARDMAN's WAPI; this fork just calls out to it instead of
 deciding locally. Point `CARDMAN_BRIDGE_ADDR` (env var, default
 `127.0.0.1:8420`) at wherever that bridge is running.
 
+## SIP soft modem (`-S`)
+
+`mm_manager -S` answers the terminal's call over SIP with a built-in
+software Bell 212A modem (2225 Hz answer tone), so no hardware modem is
+needed. It is imported from
+[`jxburros/mm_manager`](https://github.com/jxburros/mm_manager) (MIT); this
+fork adds `bind` (default `127.0.0.1`, never `0.0.0.0`) and `allow` (only
+the PBX may send SIP or RTP). **Not yet tested against a real terminal.**
+Setup with a PhreakNet/Asterisk server:
+[`docs/softmodem/PHREAKNET.md`](docs/softmodem/PHREAKNET.md). Decision and
+verification: [`docs/softmodem/ADR-0003-SIP-SOFTMODEM.md`](docs/softmodem/ADR-0003-SIP-SOFTMODEM.md).
+
 ## CI / releases
 
 This fork's `.github/workflows/release.yml` differs from upstream: it

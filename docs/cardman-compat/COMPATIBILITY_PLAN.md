@@ -19,7 +19,7 @@ this roadmap. Phases below name the pre-work item they wait on.
 Nortel Millennium terminal
    |  1200 baud Bell 212A dial-in
    v
-[ hardware modem ]  or  [ ATA -> Asterisk -> datamodem -> mm-softmodem-dte PTY ]   (docs/softmodem, ADR-0002)
+[ hardware modem ]  or  [ ATA -> Asterisk -> SIP -> mm_manager -S built-in modem ]   (docs/softmodem, ADR-0003)
    |  serial / PTY  (-f <dev> -m)
    v
 mm_manager  (CARDMAN build: MM_CARDMAN=ON)

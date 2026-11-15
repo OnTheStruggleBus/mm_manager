@@ -5,6 +5,9 @@ directory is covered under the MIT License.  Please see source code in
 third-party/ for additional licenses.
 
 Copyright (c) 2020-2023 Howard M. Harte
+Copyright (c) 2026 mmumblephone contributors (SIP virtual modem: src/mm_sip.*,
+src/mm_softmodem.*, src/mm_vmodem.*, src/mm_osal.*, imported from
+https://github.com/jxburros/mm_manager)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

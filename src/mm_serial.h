@@ -18,13 +18,17 @@ typedef SSIZE_T ssize_t;
 #define MS_RLSD_ON      0x0080
 #endif /* if defined(_MSC_VER) */
 
+struct mm_vmodem;
+
 typedef struct mm_serial_context {
     int fd;
     FILE *logstream;
     FILE *bytestream;
+    struct mm_vmodem *vmodem;   /* SIP virtual modem, used instead of a serial port when set. */
 } mm_serial_context_t;
 
 mm_serial_context_t* open_serial(const char *modem_dev, FILE *logstream, FILE *bytestream);
+mm_serial_context_t* open_virtual_serial(struct mm_vmodem *vmodem, FILE *logstream);
 extern int init_serial(mm_serial_context_t *pserial_context, int baudrate);
 extern int close_serial(mm_serial_context_t *pserial_context);
 ssize_t    read_serial(mm_serial_context_t *pserial_context, void *buf, size_t count, int inject_error);
