@@ -107,8 +107,12 @@ Owner decisions recorded with this ADR (2026-11-15):
   isolated voice VLAN, `bind`/`allow`, and no recording on the route
   (SPEC C-1, C-3 still apply).
 - Anything that reaches the modem can act as a terminal (ADR-0001 A-1).
-  `allow` limits that to the PBX; the dialplan must limit it to the
-  payphone ATA's context (SPEC C-6).
+  `allow` limits SIP and RTP to the PBX. SPEC C-6 would also limit the
+  dialplan route to the payphone's context. **Owner decision, 2026-11-15:**
+  on the PhreakNet deployment the manager number is an open, ordinary line
+  on the switch, reachable from any local line and from the PhreakNet
+  network ([`PHREAKNET.md`](PHREAKNET.md) §4). Card authorizations still go
+  through the CARDMAN bridge, which declines anything it does not approve.
 - mm_manager handles one call at a time, as before. Run one instance per
   simultaneous call-in, each with its own SIP user, `port`, `rtp_port` and
   working directory.
@@ -119,6 +123,12 @@ Owner decisions recorded with this ADR (2026-11-15):
   modem (rule 4, task T4). The SIP path adds no new raw-byte output.
 
 ## Hardware checks (replace SPEC §9.2 SM-1 to SM-3)
+
+Progress: 2026-11-15, on the PhreakNet host (Debian 13, Asterisk 22.12),
+`mm_manager -S` registered to Asterisk, and a voice call from an IAD line
+to the manager number was answered with the 2225 Hz tone (dialplan, SIP and
+RTP verified; [`PHREAKNET.md`](PHREAKNET.md) §6). No modem has trained yet,
+so none of the checks below has passed.
 
 | # | Test | Pass when | If it fails |
 |---|---|---|---|
