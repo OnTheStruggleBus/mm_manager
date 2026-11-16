@@ -95,8 +95,9 @@ Owner decisions recorded with this ADR (2026-11-15):
 - macOS (clang, `-Wall -Wextra -Werror`): the three modem/SIP tests
   compiled directly and pass; the allowed-peer half of `sip_access` skips
   there (only 127.0.0.1 exists). The full CMake build was not run on macOS.
-- Not verified: Windows (CI will build it); anything against a real
-  terminal or a real Asterisk.
+- Not verified at import: Windows (CI will build it); anything against a
+  real terminal or a real Asterisk. Real-terminal results are under
+  "Hardware checks" below.
 
 ## Consequences
 
@@ -124,17 +125,24 @@ Owner decisions recorded with this ADR (2026-11-15):
 
 ## Hardware checks (replace SPEC §9.2 SM-1 to SM-3)
 
-Progress: 2026-11-15, on the PhreakNet host (Debian 13, Asterisk 22.12),
-`mm_manager -S` registered to Asterisk, and a voice call from an IAD line
-to the manager number was answered with the 2225 Hz tone (dialplan, SIP and
-RTP verified; [`PHREAKNET.md`](PHREAKNET.md) §6). No modem has trained yet,
-so none of the checks below has passed.
+Setup for the results below (2026-11-15): PhreakNet host (Debian 13,
+Asterisk 22.12), Cisco IAD2432-24FXS, a Millennium with firmware NPA1S01
+V1.0, manager number 331-1456. mm_manager ran by hand first, then as a
+systemd service ([`PHREAKNET.md`](PHREAKNET.md) §2, §5.1, §6).
 
-| # | Test | Pass when | If it fails |
-|---|---|---|---|
-| SIP-1 | Coin or craft call-in through PhreakNet to `mm_manager -S`, default 2225 Hz answer, default MODEM table. 10 call-ins. | 10/10 reach `CONNECT` and finish the session | Check the ATA settings and `core show channel` (both legs `ulaw`). Then try `answer_tone=2100`, then the DS-5 MODEM table. |
-| SIP-2 | A real hardware modem set to Bell 212A (`AT+MS=B212`) dials the same number from another ATA port, before any payphone test. | Trains; `mm_manager` logs `Connected!` | Modem or SIP problem, not the terminal's. |
-| SIP-3 | Full install session (all tables). | Completes, within 25% of a hardware-modem baseline | Jitter or loss on the path. |
-| SIP-4 | Terminal hangs up mid-download; mm_manager killed mid-call. | Next call-in works | Call-state bug in the imported vmodem/SIP code. |
-| SIP-5 | Card call end to end (needs test cards, `docs/wapi-bridge/SPEC.md` §14.1). | As `HARDWARE_TEST_PLAN.md` 3.1 | Compare with the hardware modem on the same day. |
-| SIP-6 | Leak audit after SIP-5 over the host's logs and Asterisk logs (rule 9). | No match | Blocker. |
+| # | Test | Pass when | If it fails | Result (2026-11-15) |
+|---|---|---|---|---|
+| SIP-1 | Coin or craft call-in through PhreakNet to `mm_manager -S`, default 2225 Hz answer, default MODEM table. 10 call-ins. | 10/10 reach `CONNECT` and finish the session | Check the ATA settings and `core show channel` (both legs `ulaw`). Then try `answer_tone=2100`, then the DS-5 MODEM table. | **In progress.** Trained on the default 2225 Hz answer and MODEM table (rx about -15.5 dBm0). Every call-in on the correctly configured IAD port connected; fewer than 10 so far. Two early failures (rx near -74 dBm0) were the payphone on the wrong IAD port, not the modem. |
+| SIP-2 | A real hardware modem set to Bell 212A (`AT+MS=B212`) dials the same number from another ATA port, before any payphone test. | Trains; `mm_manager` logs `Connected!` | Modem or SIP problem, not the terminal's. | Not run (the terminal trained first). |
+| SIP-3 | Full install session (all tables). | Completes, within 25% of a hardware-modem baseline | Jitter or loss on the path. | **Completed; baseline not measured.** About 40 tables in about 3¼ minutes. First attempt: the terminal showed "download failed" while mm_manager logged success; the next call-in finished it (`02`). Matches the upstream old-firmware note. No hardware-modem baseline to compare with. |
+| SIP-4 | Terminal hangs up mid-download; mm_manager killed mid-call. | Next call-in works | Call-state bug in the imported vmodem/SIP code. | Not run. |
+| SIP-5 | Card call end to end (needs test cards, `docs/wapi-bridge/SPEC.md` §14.1). | As `HARDWARE_TEST_PLAN.md` 3.1 | Compare with the hardware modem on the same day. | **Fail-closed half only.** Test-card authorizations reached mm_manager over the soft modem and were declined with no bridge running (`failing closed`). An approval needs the CARDMAN bridge. |
+| SIP-6 | Leak audit after SIP-5 over the host's logs and Asterisk logs (rule 9). | No match | Blocker. | Not run. Output read by eye: card number and PIN only masked. |
+
+Also seen:
+
+- **Answer supervision.** PhreakNet answers the IAD call at off-hook, before
+  the terminal dials. The terminal still trained and installed, so this did
+  not block call-ins.
+- **Polarity reversal** is configured on the IAD port but not confirmed by
+  `show voice port`. No Error 51 was seen.

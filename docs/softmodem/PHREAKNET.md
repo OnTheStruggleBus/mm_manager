@@ -11,9 +11,13 @@ Millennium ─analog─> IAD/ATA (FXS) ─SIP/RTP─> Asterisk (PhreakNet) ─SI
 
 **Tested 2026-11-15** on Debian 13 (x86_64, gcc 14.2) with Asterisk 22.12
 (PJSIP) installed by PhreakScript, payphone lines on an IAD endpoint
-(`iad01`), manager number 331-1456. A voice call from an IAD line reached
-mm_manager, which answered and sent the 2225 Hz answer tone. Not yet tested:
-a modem completing training (SIP-2) or a Millennium call-in (SIP-1).
+(`iad01`, a Cisco IAD2432-24FXS), manager number 331-1456. A Millennium
+(firmware NPA1S01 V1.0) trained on the default 2225 Hz answer, downloaded a
+full install (about 40 tables in about 3¼ minutes), and made call-ins and a
+maintenance call. Test-card calls were declined because no CARDMAN bridge was
+running (fail closed). Results: §6 and the ADR-0003 hardware table. Not yet
+tested: a hardware modem (SIP-2), a card call approved through the bridge
+(SIP-5).
 
 ## 1. Build mm_manager on the Asterisk host
 
@@ -46,6 +50,31 @@ Same as any modem over VoIP (SPEC §3.1):
 - **Polarity reversal on answer: on.** Without it the terminal shows
   Error 51.
 
+**Cisco IAD2432 (tested).** The payphone's FXS voice port:
+
+```
+voice-port 2/20
+ no echo-cancel enable
+ no comfort-noise
+ playout-delay mode fixed
+ playout-delay nominal 100
+ battery-reversal
+```
+
+- **IOS numbers the ports from 0.** `voice-port 2/20` is the 21st physical
+  port, not the 20th. On the first attempts the payphone was on the port
+  next to the configured one: calls came from that port's line, and training
+  failed with the received level near -74 dBm0. On the configured port it
+  trained at about -15.5 dBm0. Check which line the call comes from in the
+  Asterisk log, then `show voice port 2/<n>`.
+- On a PhreakScript IAD config, ports with a direct dial-peer (the "modem"
+  and "rotary" ports) send the dialed 7 digits; touch-tone ports send the
+  `1800` hotline (§4). Either reaches the manager number.
+- `battery-reversal` is configured, but `show voice port 2/20 | include
+  Battery` showed only `alt-battery-feed`, so whether the port reverses
+  polarity is not confirmed. The terminal installed and called in without
+  Error 51 anyway.
+
 On the Asterisk side, check the IAD's endpoint already matches:
 
 ```bash
@@ -58,9 +87,9 @@ and `t38_udptl : false`.
 **Answer supervision on PhreakNet.** PhreakNet answers the IAD call at
 off-hook to play its own dial tone (`Answer()` in `from-<iad>`), so the IAD's
 polarity reversal happens before the terminal dials, not when the modem
-answers. Whether the Millennium's call-in tolerates that is not yet known
-(SIP-1). If the terminal shows Error 51 or drops right after `CONNECT`,
-suspect this first.
+answers. On the tested setup the Millennium (NPA1S01 V1.0) trained and
+installed anyway. If your terminal shows Error 51 or drops right after
+`CONNECT`, suspect this first.
 
 ## 3. Asterisk: an endpoint for mm_manager
 
@@ -214,6 +243,9 @@ exten => _X.,1,Hangup()
 
 ## 5. Run mm_manager
 
+For a first test, run it by hand as below. For day-to-day use, run it as a
+service (§5.1).
+
 Run it from the repo directory: it reads `config/` from the current
 directory and writes `mm_manager.db` there. The password goes from the
 root-only file straight into its environment:
@@ -267,6 +299,97 @@ the default loopback bind):
 ./build/mm_manager -S "mm-modem@<asterisk ip>:5060;bind=<this host's voice-VLAN ip>;port=5062;rtp_port=30000" -n <manager number>
 ```
 
+### 5.1 Run it as a service (systemd)
+
+Tested on the same host. mm_manager runs as its own unprivileged user, from
+`/var/lib/mm-manager`, and starts after Asterisk at boot. Stop any copy you
+started by hand first: two instances clash on port 5062.
+
+```bash
+sudo useradd --system --home-dir /var/lib/mm-manager --shell /usr/sbin/nologin mm-manager
+```
+
+```bash
+sudo install -d -o mm-manager -g mm-manager -m 0750 /var/lib/mm-manager
+```
+
+```bash
+sudo cp -a ~/mm_manager/config ~/mm_manager/tables /var/lib/mm-manager/
+```
+
+If you already ran mm_manager by hand, move its database too, so the
+terminals' records carry over:
+
+```bash
+sudo mv ~/mm_manager/mm_manager.db /var/lib/mm-manager/
+```
+
+```bash
+sudo chown -R mm-manager:mm-manager /var/lib/mm-manager
+```
+
+```bash
+sudo install -m 0755 ~/mm_manager/build/mm_manager /usr/local/bin/mm_manager
+```
+
+`/etc/systemd/system/mm-manager.service` (systemd reads `sip.env` as root
+and passes the password in the environment; the service user cannot read the
+file):
+
+```ini
+[Unit]
+Description=mm_manager - Nortel Millennium manager (SIP soft modem)
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mm-manager
+Group=mm-manager
+WorkingDirectory=/var/lib/mm-manager
+EnvironmentFile=/etc/mm_manager/sip.env
+ExecStart=/usr/bin/stdbuf -oL -eL /usr/local/bin/mm_manager -S "mm-modem@127.0.0.1:5060;port=5062;rtp_port=30000" -n <manager number> -d tables/default -t tables
+KillSignal=SIGINT
+TimeoutStopSec=15
+Restart=always
+RestartSec=5
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/mm-manager
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+- `stdbuf -oL` makes mm_manager's output reach the journal line by line.
+- `LimitCORE=0`: a core dump would contain card data from memory.
+- `KillSignal=SIGINT` stops it the same way as Ctrl-C.
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now mm-manager
+```
+
+```bash
+systemctl status mm-manager
+```
+
+Check it registered (`mm-modem` **Not in use**, contact **Avail**) as in §5.
+Watch calls with `journalctl -u mm-manager -f`.
+
+Day to day:
+
+- The live tables and database are in `/var/lib/mm-manager`; the copies in
+  `~/mm_manager` are no longer used. Files added there must be owned by
+  `mm-manager`.
+- To update: `git pull` and rebuild in `~/mm_manager`, then
+  `sudo install -m 0755 ~/mm_manager/build/mm_manager /usr/local/bin/mm_manager && sudo systemctl restart mm-manager`.
+- The journal holds what mm_manager prints, with card numbers masked. Never
+  add `-v`, `-l`, `-p` or `-u` to `ExecStart` (rule 4).
+
 ## 6. First tests
 
 **Voice-call check (no modem).** From any phone on the IAD, dial the manager
@@ -299,6 +422,26 @@ Then, in order (ADR-0003 "Hardware checks"):
 
 Results go in the ADR-0003 hardware table and in
 `docs/cardman-compat/HARDWARE_TEST_PLAN.md`.
+
+### What happened on the tested setup (2026-11-15)
+
+- **Terminal setup.** The terminal asks for the manager number with an area
+  code (full NPA). We keyed `216 331 1456`; PhreakNet routes on the 7
+  digits. The terminal's own ID was set in the same NPA (`2163311821`).
+- **Training.** Trained on the default 2225 Hz answer and default MODEM
+  table; no `answer_tone=2100` or DS-5 table was needed. Received level about
+  -15.5 dBm0. (Near -74 dBm0 means the payphone is on the wrong IAD port, §2.)
+- **Install.** The first full install ended with the terminal showing
+  "download failed" although mm_manager logged the session as complete. The
+  next call-in finished the install (status `02`). The upstream README
+  reports the same with old terminal firmware (this one is NPA1S01 V1.0).
+  If the first install shows failed, let it call in once more.
+- **Call-ins and maintenance.** Later call-ins and a maintenance call
+  completed normally.
+- **Card calls.** Test-card calls reached mm_manager and were declined,
+  because no CARDMAN bridge was running (`could not reach bridge … failing
+  closed`). The card number and PIN appeared only masked in mm_manager's
+  output. This was checked by eye, not by the rule 9 decode audit (SIP-6).
 
 ## 7. Reading the Asterisk log
 
